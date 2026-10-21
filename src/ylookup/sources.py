@@ -1,34 +1,22 @@
-"""Local source evidence for reconciliation; no target access or posting approval."""
+"""General source tools: header-row tables in a workbook, a bank statement PDF, name matching.
 
-from datetime import datetime
-from decimal import Decimal, ROUND_HALF_UP
-import hashlib
-import json
-from pathlib import Path
+No business vocabulary lives here. A table is whatever a workbook header row says it is; which
+tables and columns matter is learned by the builder and stored in the workflow.
+"""
+
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import re
 import unicodedata
 
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 from pypdf import PdfReader
 
-from .workflow import execute, number, validate_workflow
 
-
-ALIASES = {
-    "id": {"id", "investor id", "partner id", "lp id"},
-    "investor": {"investor", "investor name", "lp name", "partner name"},
-    "called": {"called", "amount called", "capital call amount", "total call", "amount due"},
-    "received": {"received", "amount received", "cash collected", "money received"},
-    "outstanding": {"outstanding", "amount outstanding", "remaining", "balance due"},
-    "transaction_type": {"trans type", "transaction type"},
-    "account": {"gl account code", "account code"},
-    "entity": {"legal entity", "fund name"},
-    "bank_account": {"bank account", "bank account name"},
-    "batch_type": {"batch type"},
-}
-ROLES = {"roster": ("id", "investor", "called"),
-         "accounts": ("transaction_type", "account"),
-         "constants": ("entity", "bank_account", "batch_type")}
+# ponytail: a sheet ends after 50 empty rows; Excel's used range is often inflated far past the data
+# (the tracker reports 16,406 rows). Raise it if real files leave bigger gaps inside a table.
+BLANK_RUN = 50
 
 
 def normalise(value):
@@ -37,100 +25,287 @@ def normalise(value):
     return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
 
 
-def meaning(value):
-    label = normalise(value)
-    if re.fullmatch(r"call(?: \d+)? total call", label):
-        return "called"
-    matches = [key for key, names in ALIASES.items() if label in names]
-    return matches[0] if len(matches) == 1 else None
+def label(value):
+    return " ".join(str(value).split())
+
+
+def number(value):
+    if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+        raise ValueError("Expected a finite numeric value, not missing data.")
+    try:
+        result = Decimal(str(value))
+    except InvalidOperation as error:
+        raise ValueError("Invalid numeric value.") from error
+    if not result.is_finite():
+        raise ValueError("Expected a finite numeric value.")
+    return result
 
 
 def money(value):
     return str(number(value).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
-def question(code, detail, **evidence):
-    return {"code": code, "question": detail, **evidence}
+def kind(value):
+    if value is None or isinstance(value, str) and not value.strip():
+        return None
+    if isinstance(value, (datetime, date)):
+        return "date"
+    if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+        return "number"
+    return "text"
 
 
-def read_workbook(path):
-    book = load_workbook(path, read_only=True, data_only=True)
-    raw = load_workbook(path, read_only=True, data_only=False)
+def day(value):
+    return value.date() if isinstance(value, datetime) else value
+
+
+def canon(value):
+    """Comparable form of a cell value, for indexes and equality."""
+    k = kind(value)
+    if k == "number":
+        return money(value)
+    if k == "date":
+        return day(value).isoformat()
+    return None if k is None else " ".join(str(value).split())
+
+
+def equivalent(actual, expected):
+    a, b = kind(actual), kind(expected)
+    if a is None or b is None:
+        return a is None and b is None
+    if a != b or (a == "text") != (isinstance(actual, str) and isinstance(expected, str)):
+        return False
+    x, y = canon(actual), canon(expected)
+    if x == y:
+        return True
+    # ponytail: long free text (bank references) is compared on letters and digits only, because PDF
+    # extraction moves spaces and separators; short codes and labels stay exact.
+    return a == "text" and min(len(x), len(y)) > 60 and re.sub(r"\W", "", x) == re.sub(r"\W", "", y)
+
+
+def question(code, text, key, options=None, stop=None, **evidence):
+    """Something only a person can settle. The key makes the id stable, so a recorded answer applies again.
+
+    options: answers the code can act on (free text is accepted when absent).
+    stop: the option meaning "do not continue"; choosing it stops the command with that reason.
+    """
+    return {"id": f"{code}:{key}", "code": code, "question": text, "options": options, "stop": stop, **evidence}
+
+
+def answered(item, answers):
+    """The recorded answer text for a question, or None. Choosing its stop option raises."""
+    entry = (answers or {}).get(item["id"])
+    text = entry.get("answer") if isinstance(entry, dict) else entry
+    if text is not None and item.get("stop") and text == item["stop"]:
+        raise ValueError(f"Stopped by a recorded answer: {item['question']} -> {text}")
+    return text
+
+
+def sheet_rows(path):
+    """{sheet: [(row number, values, formulas)]} for non-empty rows, read in one streaming pass."""
+    values = load_workbook(path, read_only=True, data_only=True)
+    formulas = load_workbook(path, read_only=True, data_only=False)
     try:
-        candidates = {role: [] for role in ROLES}
-        for sheet in book:
-            for index, row in enumerate(sheet.iter_rows(values_only=True), 1):
-                columns = {}
-                for column, value in enumerate(row, 1):
-                    role = meaning(value) if value is not None else None
-                    if role:
-                        columns.setdefault(role, []).append(column)
-                for role, required in ROLES.items():
-                    if index < sheet.max_row and all(field in columns for field in required):
-                        candidates[role].append({"sheet": sheet.title, "header_row": index,
-                                                 "columns": {k: columns[k] for k in required}})
-        bindings, issues = {}, []
-        for role, choices in candidates.items():
-            if len(choices) != 1 or any(len(v) != 1 for choice in choices for v in choice["columns"].values()):
-                issues.append(question("binding", f"Which table/columns supply the {role} role?",
-                                       required_fields=list(ROLES[role]), candidates=choices))
-            else:
-                selected = choices[0]
-                bindings[role] = {**selected, "columns": {k: v[0] for k, v in selected["columns"].items()}}
-        result = {"bindings": bindings, "questions": issues, "roster": [], "accounts": [],
-                  "constants": [], "currency": None}
-        for role, binding in bindings.items():
-            sheet = book[binding["sheet"]]
-            columns = binding["columns"]
-            started = False
-            for row_index, row in enumerate(sheet.iter_rows(min_row=binding["header_row"] + 1, values_only=True), binding["header_row"] + 1):
-                values = {key: row[col - 1] if col <= len(row) else None for key, col in columns.items()}
-                provenance = {"sheet": sheet.title, "row": row_index}
-                if role == "roster":
-                    if values["id"] is None and values["investor"] is None:
-                        if not started and isinstance(values["called"], str) and re.fullmatch(r"[A-Z]{3}", values["called"]):
-                            result["currency"] = values["called"]
-                        elif started:
-                            formula = raw[sheet.title].cell(row_index, columns["called"]).value
-                            if isinstance(formula, str) and re.match(r"=SUM\(", formula, re.I):
-                                # An explicit summary ends this table, not the workbook's used range.
-                                break
-                            if values["called"] is not None:
-                                issues.append(question("roster_identity", "Resolve an amount row without investor identity or an unlabelled total.", **provenance))
-                        continue
-                    started = True
-                    if any(values[key] is None for key in columns):
-                        formula = raw[sheet.title].cell(row_index, columns["called"]).value
-                        issues.append(question("roster_value", "Resolve missing investor ID/name/called amount or unavailable formula result.",
-                                               **provenance, called_formula=str(formula) if isinstance(formula, str) and formula.startswith("=") else None))
-                        continue
-                    if (not isinstance(values["id"], str) or not values["id"].strip() or
-                            not isinstance(values["investor"], str) or not normalise(values["investor"])):
-                        issues.append(question("roster_identity", "Provide text investor IDs/names without losing identifier formatting.", **provenance))
-                        continue
-                    try:
-                        called = money(values["called"])
-                    except (ValueError, ArithmeticError):
-                        issues.append(question("called_amount", "Provide a finite evaluated called amount.", **provenance))
-                        continue
-                    result["roster"].append({"id": values["id"], "name": values["investor"],
-                                               "called": called, "source": provenance})
+        result = {}
+        for sheet in values:
+            rows, blank = [], 0
+            pairs = zip(sheet.iter_rows(values_only=True), formulas[sheet.title].iter_rows(values_only=True))
+            for index, (row, raw) in enumerate(pairs, 1):
+                raw = [getattr(f, "text", f) for f in raw]
+                raw = [f if isinstance(f, str) and f.startswith("=") else None for f in raw]
+                if any(kind(v) for v in row) or any(raw):
+                    rows.append((index, list(row), raw))
+                    blank = 0
                 else:
-                    if all(value is None for value in values.values()):
-                        continue
-                    if any(value is None for value in values.values()):
-                        issues.append(question("lookup_value", f"Resolve missing values in the {role} table.", **provenance))
-                        continue
-                    result[role].append({**{k: str(v) for k, v in values.items()}, "source": provenance})
-        ids = [row["id"] for row in result["roster"]]
-        if not ids or len(ids) != len(set(ids)):
-            issues.append(question("roster_ids", "Resolve an empty roster or duplicate investor IDs."))
-        if not result["currency"]:
-            issues.append(question("tracker_currency", "Which currency applies to the called amounts?"))
+                    blank += 1
+                    if blank >= BLANK_RUN:
+                        break
+            result[sheet.title] = rows
         return result
     finally:
-        book.close()
-        raw.close()
+        values.close()
+        formulas.close()
+
+
+def at(cells, column):
+    return cells[column] if column < len(cells) else None
+
+
+def is_header(values):
+    cells = [v for v in values if kind(v)]
+    texts = [normalise(v) for v in cells if isinstance(v, str)]
+    return len(cells) >= 2 and len(texts) == len(cells) and all(texts) and len(set(texts)) == len(texts)
+
+
+def make_table(sheet, header, block):
+    """A header row plus the contiguous rows under it, split into records and the rows around them.
+
+    The key column is the first one holding distinct text on at least a third of the rows (an ID or a name). Rows without
+    a key before the first record are units rows (e.g. USD), after the last one totals; rows without a
+    key between records are orphans a person must explain.
+    """
+    row_number, values, _ = header
+    headers = {c: label(v) for c, v in enumerate(values) if kind(v)}
+    key = None
+    for column in sorted(headers):
+        found = [at(r[1], column) for r in block if kind(at(r[1], column))]
+        enough = len(found) >= 2 and 3 * len(found) >= len(block) or len(found) == len(block) == 1
+        if enough and all(isinstance(v, str) for v in found) and len(set(found)) == len(found):
+            key = column
+            break
+    filled = [r for r in block if any(kind(at(r[1], c)) or at(r[2], c) for c in headers)]
+    if key is None:
+        records, pre, post, orphans = filled, [], [], []
+    else:
+        keyed = [i for i, r in enumerate(block) if kind(at(r[1], key))]
+        first, last = (keyed[0], keyed[-1]) if keyed else (len(block), len(block))
+        records = [block[i] for i in keyed]
+        pre, post = block[:first], block[last + 1:]
+        orphans = [r for r in block[first:last + 1] if not kind(at(r[1], key)) and r in filled]
+    units = {headers[c]: at(r[1], c).strip() for r in pre for c in headers
+             if isinstance(at(r[1], c), str) and re.fullmatch(r"[A-Z]{3}", at(r[1], c).strip())}
+    return {"sheet": sheet, "row": row_number, "headers": headers, "key": headers.get(key), "width": len(headers),
+            "records": [{"row": r[0], "cells": r[1], "formulas": r[2]} for r in records],
+            "all": [{"row": r[0], "cells": r[1], "formulas": r[2]} for r in filled],
+            "orphans": [r[0] for r in orphans], "post": [{"row": r[0], "formulas": r[2]} for r in post],
+            "units": units, "rows": len(filled)}
+
+
+def find_tables(rows_by_sheet):
+    tables = []
+    for sheet, rows in rows_by_sheet.items():
+        index = 0
+        while index < len(rows):
+            if not is_header(rows[index][1]):
+                index += 1
+                continue
+            end = index + 1
+            while end < len(rows) and rows[end][0] == rows[end - 1][0] + 1:
+                end += 1
+            tables.append(make_table(sheet, rows[index], rows[index + 1:end]))
+            index = end
+    return tables
+
+
+def column_types(table, column):
+    return sorted({kind(at(r["cells"], column)) or "blank" for r in table["records"]}) or ["blank"]
+
+
+def rekey(table, columns):
+    """A found table with its records keyed by the workflow's column labels instead of positions."""
+    key_column = next((c for c, h in table["headers"].items() if h == table["key"]), None)
+    keyed = lambda rows: [{"row": r["row"], "key": None if key_column is None else at(r["cells"], key_column),
+                           "values": {label: at(r["cells"], c) for label, c in columns.items()},
+                           "formulas": {label: at(r["formulas"], c) for label, c in columns.items()}} for r in rows]
+    return {"sheet": table["sheet"], "row": table["row"], "columns": columns, "rows": table["rows"],
+            "units": {label: table["units"].get(table["headers"][c]) for label, c in columns.items()},
+            "orphans": table["orphans"], "post": table["post"], "headers": table["headers"],
+            "records": keyed(table["records"]), "all": keyed(table["all"])}
+
+
+def table_score(want, table):
+    labels = {normalise(h) for h in table["headers"].values()}
+    return sum(normalise(h) in labels for h in want["headers"]), table["sheet"] == want["sheet"]
+
+
+def describe(table):
+    return f"{table['sheet']}!row {table['row']}: " + ", ".join(list(table["headers"].values())[:8])
+
+
+def bind_tables(spec, found, answers=None):
+    """Find each workflow table in the current workbook by its header fingerprint, then its columns.
+
+    A table binds when at least half its build-time headers are still there, or its sheet name is.
+    Best matches are assigned first, so a strong match is never stolen by a weak one. Returns
+    (bound tables, problems); a problem names what is missing and the candidates a person can choose.
+    """
+    pairs = sorted(((table_score(want, table), key, i) for key, want in spec["tables"].items()
+                    for i, table in enumerate(found)), reverse=True)
+    chosen, claimed = {}, set()
+    for (hits, same_sheet), key, i in pairs:
+        if key in chosen or i in claimed:
+            continue
+        if 2 * hits >= len(spec["tables"][key]["headers"]) or same_sheet:
+            ties = [j for (h, s), k, j in pairs if k == key and (h, s) == (hits, same_sheet) and j not in claimed]
+            if len(ties) == 1:
+                chosen[key] = i
+                claimed.add(i)
+    bound, problems = {}, []
+    for key, want in spec["tables"].items():
+        if key not in chosen:
+            item = question("table_choice", f"Which table is now the '{key}' table (previously {want['sheet']!r} "
+                            f"with headers {want['headers'][:6]})?", key,
+                            options=[describe(t) for i, t in enumerate(found) if i not in claimed], table=key)
+            reply = answered(item, answers)
+            index = next((i for i, t in enumerate(found) if describe(t) == reply and i not in claimed), None)
+            if index is None:
+                problems.append(item)
+                continue
+            chosen[key] = index
+            claimed.add(index)
+        table = found[chosen[key]]
+        current = {normalise(h): c for c, h in table["headers"].items()}
+        known = {normalise(h) for h in want["headers"]} | {normalise(m["header"]) for m in want["columns"].values()}
+        columns = {name: current[normalise(m["header"])] for name, m in want["columns"].items() if normalise(m["header"]) in current}
+        for name, meta in want["columns"].items():
+            if name in columns:
+                continue
+            item = question(
+                "column_mapping", f"Which column of {table['sheet']} now holds '{name}' (previously '{meta['header']}')?",
+                f"{key}.{name}", table=key, column=name, previous_header=meta["header"], types=meta["types"],
+                where=f"{table['sheet']}!row {table['row']}",
+                options=[h for c, h in table["headers"].items() if normalise(h) not in known and c not in columns.values()],
+                candidate_types={h: column_types(table, c) for c, h in table["headers"].items() if normalise(h) not in known})
+            reply = answered(item, answers)
+            if reply is not None:
+                entry = answers[item["id"]]
+                problem = (f"'{reply}' is already used for another column" if current.get(normalise(reply)) in columns.values()
+                           else mapping_problem(spec, key, name, reply, item, isinstance(entry, str) or entry.get("by") != "model"))
+                if problem is None:
+                    columns[name] = current[normalise(reply)]
+                    continue
+                item = {**item, "question": item["question"] + f" The answer '{reply}' was rejected: {problem}"}
+            problems.append(item)
+        bound[key] = rekey(table, columns)
+    return bound, problems
+
+
+def mapping_problem(spec, key, name, header, item, by_person):
+    """Why a proposed column for a renamed header cannot be right, or None.
+
+    A column the workflow writes must be empty in the input, and when several empty columns fit, the
+    values give no evidence, so only a person can choose. A column it reads must hold the value types
+    it held at build time.
+    """
+    if header not in (item["options"] or []):
+        return f"'{header}' is not one of the unrecognised headers {item['options']}"
+    types = set(item["candidate_types"][header]) - {"blank"}
+    if name in spec["outputs"].get(key, {}).get("columns", []):
+        if types:
+            return f"'{header}' already holds {sorted(types)} values; the workflow writes {key}.{name} and would overwrite them"
+        empty = [h for h in item["options"] if not set(item["candidate_types"][h]) - {"blank"}]
+        if len(empty) > 1 and not by_person:
+            return f"{len(empty)} empty columns could hold {key}.{name} ({', '.join(empty)}); the values give no evidence, so a person must choose"
+        return None
+    before = set(item["types"]) - {"blank"}
+    if types and before and not types <= before:
+        return f"'{header}' holds {sorted(types)} values but {key}.{name} held {sorted(before)}"
+    return None
+
+
+def binding_changes(spec, bound):
+    changes = []
+    for key, want in spec["tables"].items():
+        table = bound.get(key)
+        if table is None:
+            continue
+        if table["sheet"] != want["sheet"]:
+            changes.append(f"{key}: tab '{want['sheet']}' -> '{table['sheet']}'")
+        for name, column in table["columns"].items():
+            before = want["columns"][name].get("position")
+            if before and before != get_column_letter(column + 1):
+                changes.append(f"{key}.{name}: column {before} -> {get_column_letter(column + 1)}")
+    return changes
 
 
 def parse_statement(pages):
@@ -139,12 +314,13 @@ def parse_statement(pages):
         currencies.update(re.findall(r"\bCurrency\s*:\s*([A-Z]{3})\b", text))
         positions, current = None, None
         for line_number, line in enumerate(text.splitlines(), 1):
-            labels = {label: re.search(r"\b" + label + r"\b", line, re.I)
-                      for label in ["date", "description", "withdrawal", "deposit", "balance"]}
+            where = f"page {page_number} line {line_number}"
+            labels = {name: re.search(r"\b" + name + r"\b", line, re.I)
+                      for name in ["date", "description", "withdrawal", "deposit", "balance"]}
             if all(labels.values()):
                 positions = {k: (v.start() + v.end()) / 2 for k, v in labels.items()}
                 if list(positions.values()) != sorted(positions.values()):
-                    issues.append(question("bank_layout", "Provide a supported ordered transaction table.", page=page_number))
+                    issues.append(question("bank_layout", "Provide a supported ordered transaction table.", f"page {page_number}"))
                     positions = None
                 current = None
                 continue
@@ -154,9 +330,9 @@ def parse_statement(pages):
             if date_match:
                 current = None
                 try:
-                    date = datetime.strptime(date_match.group(1), "%d %b %Y").date().isoformat()
+                    when = datetime.strptime(date_match.group(1), "%d %b %Y").date().isoformat()
                 except ValueError:
-                    issues.append(question("receipt_date", "Resolve the transaction date.", page=page_number, line=line_number))
+                    issues.append(question("receipt_date", "Resolve the transaction date.", where))
                     continue
                 boundary = (positions["description"] + positions["withdrawal"]) / 2
                 amounts = {key: [] for key in ["withdrawal", "deposit", "balance"]}
@@ -166,23 +342,22 @@ def parse_statement(pages):
                         nearest = min(amounts, key=lambda key: abs(positions[key] - centre))
                         amounts[nearest].append(match.group())
                 if any(len(values) > 1 for values in amounts.values()) or len(amounts["balance"]) != 1 or sum(bool(amounts[k]) for k in ["withdrawal", "deposit"]) != 1:
-                    issues.append(question("receipt_amount", "Resolve deposit/withdrawal/balance columns; no amount will be guessed.", page=page_number, line=line_number))
+                    issues.append(question("receipt_amount", "Resolve deposit/withdrawal/balance columns; no amount will be guessed.", where))
                     continue
-                kind = "deposit" if amounts["deposit"] else "withdrawal"
-                amount = money(amounts[kind][0].replace(",", ""))
+                kind_ = "deposit" if amounts["deposit"] else "withdrawal"
+                amount = money(amounts[kind_][0].replace(",", ""))
                 if number(amount) < 0:
-                    issues.append(question("receipt_sign", "Resolve a negative transaction amount.", page=page_number, line=line_number))
+                    issues.append(question("receipt_sign", "Resolve a negative transaction amount.", where))
                     continue
-                current = {"date": date, "kind": kind, "amount": amount,
+                current = {"date": when, "kind": kind_, "amount": amount,
                            "balance": money(amounts["balance"][0].replace(",", "")),
                            "description": line[date_match.end():int(boundary)].strip(),
                            "source": {"page": page_number, "line": line_number}}
                 transactions.append(current)
             elif line.strip():
                 boundary = (positions["description"] + positions["withdrawal"]) / 2
-                monetary_text = line[int(boundary):]
-                if re.search(r"(?<![\w.])-?\d[\d,]*\.\d{2}(?![\w.])", monetary_text):
-                    issues.append(question("receipt_date", "Resolve an undated or unsupported transaction row; monetary values will not be attached to another receipt.", page=page_number, line=line_number))
+                if re.search(r"(?<![\w.])-?\d[\d,]*\.\d{2}(?![\w.])", line[int(boundary):]):
+                    issues.append(question("receipt_date", "Resolve an undated or unsupported transaction row; monetary values will not be attached to another receipt.", where))
                     current = None
                     continue
                 if re.search(r"Thank you for|Generated on", line, re.I):
@@ -190,113 +365,111 @@ def parse_statement(pages):
                 elif current:
                     current["description"] += " " + line.strip()
         if positions is None:
-            issues.append(question("bank_layout", "Provide a readable text-layer statement with Date/Description/Withdrawal/Deposit/Balance headers.", page=page_number))
+            issues.append(question("bank_layout", "Provide a readable text-layer statement with Date/Description/Withdrawal/Deposit/Balance headers.", f"page {page_number}"))
     for transaction in transactions:
         reference_currencies = set(re.findall(r"\b([A-Z]{3})\|\d+(?:\.\d+)?\|", transaction["description"]))
         if reference_currencies and (len(currencies) != 1 or reference_currencies != currencies):
             issues.append(question("receipt_currency", "Resolve conflicting currency evidence in the transaction reference.",
-                                   source=transaction["source"], reference_currencies=sorted(reference_currencies)))
+                                   f"{transaction['date']} {transaction['amount']}", reference_currencies=sorted(reference_currencies)))
     if len(currencies) != 1:
-        issues.append(question("statement_currency", "Resolve the statement currency.", candidates=sorted(currencies)))
+        issues.append(question("statement_currency", "Which currency is this statement in?", "statement",
+                               options=sorted(currencies) or None))
     if not transactions:
-        issues.append(question("bank_records", "No supported transaction records were extracted; confirm whether this is an empty or unsupported statement."))
+        issues.append(question("bank_records", "No supported transaction records were extracted; confirm whether this is an empty or unsupported statement.", "statement"))
     return {"transactions": transactions, "currency": next(iter(currencies)) if len(currencies) == 1 else None,
             "questions": issues}
 
 
 def read_statement(path):
-    # shortcut: aligned text-layer tables only; add an OCR/layout adapter for other statements.
+    # ponytail: aligned text-layer tables only; add an OCR/layout adapter for other statements.
     reader = PdfReader(path)
     return parse_statement([(index, page.extract_text(extraction_mode="layout"))
                             for index, page in enumerate(reader.pages, 1)])
 
 
-def match_investor(description, roster, allow_partial=True):
+def match_names(description, names, policy="full_or_unique_prefix"):
+    """Indexes of names found in a bank reference: full names, or first name plus a surname prefix."""
     text = normalise(description)
-    full = [row for row in roster if re.search(r"\b" + re.escape(normalise(row["name"])) + r"\b", text)]
-    if full or not allow_partial:
+    full = [i for i, name in names.items() if re.search(r"\b" + re.escape(normalise(name)) + r"\b", text)]
+    if full or policy == "full_name_only":
         return full, "full_name"
     tokens = text.split()
-    matches = []
-    for row in roster:
-        parts = normalise(row["name"]).split()
+    partial = []
+    for i, name in names.items():
+        parts = normalise(name).split()
         if len(parts) >= 2 and parts[0] in tokens and any(
                 token == parts[-1] or (len(token) >= 3 and parts[-1].startswith(token)) for token in tokens):
-            matches.append(row)
-    return matches, "first_name_and_surname_prefix"
+            partial.append(i)
+    return partial, "first_name_and_surname_prefix"
 
 
-def prepare_sources(workbook, bank, workflow, events, matching_policy="full_or_unique_prefix"):
-    if matching_policy not in {"full_name_only", "full_or_unique_prefix"}:
-        raise ValueError("Unsupported source matching policy.")
-    if workflow is not None:
-        validate_workflow(workflow)
-        source_fields = {workflow[key]: meaning(workflow[key]) for key in ["left", "right"]}
-        if set(source_fields.values()) != {"called", "received"} or meaning(workflow["output"]) != "outstanding":
-            raise ValueError("The numeric rule must bind called/received source meanings and an outstanding output.")
-    events.emit("run_start", phase="sources", workflow_version=workflow["version"] if workflow else None,
-                source_sha256={str(path): hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in [workbook, bank]})
-    try:
-        extracted = read_workbook(workbook)
-        statement = read_statement(bank)
-        issues = extracted["questions"] + statement["questions"]
-        events.emit("source_extraction", bindings=extracted["bindings"], roster_count=len(extracted["roster"]),
-                    transactions=statement["transactions"], questions=issues)
-        matched, used = {}, set()
-        coverage_complete = not issues
-        for transaction in statement["transactions"]:
-            signature = (transaction["date"], normalise(transaction["description"]), transaction["kind"], transaction["amount"])
-            if signature in used:
-                issues.append(question("duplicate_receipt", "Resolve a repeated transaction before counting it.", source=transaction["source"]))
-                coverage_complete = False
+LEAVE = "Leave it unmatched for follow-up"
+
+
+def match_receipts(statement, table, name, policy, answers):
+    """Assign each deposit to one record by its name column. Doubt becomes a question, never a guess.
+
+    Returns per-record receipts {record index: {amount, date, description}}, the kept deposits with
+    their record (or None when a person chose to leave one unmatched), and the open questions.
+    """
+    names = {i: r["values"][name] for i, r in enumerate(table["records"])
+             if isinstance(r["values"].get(name), str) and normalise(r["values"][name])}
+    display = {i: n if list(names.values()).count(n) == 1 else f"{n} (row {table['records'][i]['row']})"
+               for i, n in names.items()}
+    deposits, issues, seen = [], [], set()
+    for t in statement["transactions"]:
+        key = f"{t['date']} {t['kind']} {t['amount']}"
+        signature = (t["date"], normalise(t["description"]), t["kind"], t["amount"])
+        if signature in seen:
+            item = question("duplicate_transaction", f"The statement repeats a {t['kind']} of {t['amount']} on {t['date']}. Count it twice?",
+                            key, options=["Count it twice", "Count it once"], source=t["source"])
+            if answered(item, answers) is None:
+                issues.append(item)
+            if answered(item, answers) != "Count it twice":
                 continue
-            used.add(signature)
-            if transaction["kind"] != "deposit":
-                issues.append(question("withdrawal_policy", "How should this withdrawal affect capital-call reconciliation?", source=transaction["source"]))
-                coverage_complete = False
+        seen.add(signature)
+        if t["kind"] != "deposit":
+            item = question("withdrawal", f"The statement has a withdrawal of {t['amount']} on {t['date']}. How should it be treated?",
+                            key, options=["Leave it out of this reconciliation", "Stop for review"],
+                            stop="Stop for review", source=t["source"])
+            if answered(item, answers) is None:
+                issues.append(item)
+            continue
+        found, method = match_names(t["description"], names, policy)
+        record = found[0] if len(found) == 1 else None
+        if record is None:
+            item = question("receipt_match", f"Which {name} paid {t['amount']} on {t['date']}? "
+                            f"{'No' if not found else len(found)} {'name matches' if not found else 'names match'} the bank reference.",
+                            key, options=[display[i] for i in (found or names)] + [LEAVE],
+                            source=t["source"], method=method)
+            reply = answered(item, answers)
+            if reply is None:
+                issues.append(item)
                 continue
-            candidates, method = match_investor(transaction["description"], extracted["roster"], matching_policy == "full_or_unique_prefix")
-            transaction["match"] = {"method": method, "candidates": [row["id"] for row in candidates]}
-            if len(candidates) != 1:
-                issues.append(question("investor_match", "Identify the investor for this receipt; no unique supported match exists.", source=transaction["source"], candidates=transaction["match"]["candidates"]))
-                coverage_complete = False
-                continue
-            investor = candidates[0]
-            transaction["investor_id"] = investor["id"]
-            if investor["id"] in matched:
-                issues.append(question("multiple_receipts", "Resolve the grouping/date policy for repeated investor receipts.", investor_id=investor["id"]))
-                coverage_complete = False
-            else:
-                matched[investor["id"]] = transaction
-            events.emit("receipt_match", source=transaction["source"], investor_id=investor["id"], method=method)
-        tracker = []
-        if coverage_complete:
-            numeric_input = []
-            for investor in extracted["roster"]:
-                receipt = matched.get(investor["id"])
-                received = receipt["amount"] if receipt else "0.00"
-                row = {**investor, "received": received, "receipt_date": receipt["date"] if receipt else None}
-                tracker.append(row)
-                if workflow is not None:
-                    numeric_input.append({"id": investor["id"], **{field: row[role] for field, role in source_fields.items()}})
-            if workflow is not None:
-                by_id = {row["id"]: row[workflow["output"]] for row in execute(workflow, numeric_input)}
-                for row in tracker:
-                    row["outstanding"] = money(by_id[row["id"]])
-        if extracted["currency"] and statement["currency"] and extracted["currency"] != statement["currency"]:
-            issues.append(question("currency_conflict", "Statement and tracker currencies differ; confirm a currency policy before posting.", statement_currency=statement["currency"], tracker_currency=extracted["currency"]))
-        for issue in issues:
-            events.emit("inquiry", **issue)
-        result = {"status": "needs_input" if issues else "success", "bindings": extracted["bindings"],
-                  "statement_currency": statement["currency"], "tracker_currency": extracted["currency"],
-                  "roster": extracted["roster"], "transactions": statement["transactions"], "tracker": tracker,
-                  "accounts": extracted["accounts"], "constants": extracted["constants"], "questions": issues}
-        with (events.directory / "sources.json").open("x", encoding="utf-8") as stream:
-            json.dump(result, stream, indent=2)
-        events.emit("run_end", status=result["status"], source_evidence="sources.json")
-        return {"status": result["status"], "source_evidence": str(events.directory / "sources.json"),
-                "investors": len(result["roster"]), "transactions": len(result["transactions"]),
-                "tracker_records": len(tracker), "questions": issues}
-    except Exception as error:
-        events.emit("run_end", status="error", reason=str(error))
-        raise
+            if reply != LEAVE:
+                record = next((i for i, n in display.items() if n == reply), None)
+                if record is None:
+                    issues.append({**item, "question": item["question"] + f" (the answer '{reply}' is not one of the options)"})
+                    continue
+        deposits.append({**t, "record": record})
+    receipts = {}
+    for t in deposits:
+        if t["record"] is None:
+            continue
+        entry = receipts.setdefault(t["record"], {"amount": Decimal(0), "dates": [], "description": []})
+        entry["amount"] += number(t["amount"])
+        entry["dates"].append(t["date"])
+        entry["description"].append(t["description"])
+    for index, entry in receipts.items():
+        dates = sorted(set(entry.pop("dates")))
+        entry["description"] = " ".join(entry["description"])
+        if len(dates) > 1:
+            item = question("receipt_date", f"{display[index]} paid on {len(dates)} dates. Which date should the entry use?",
+                            f"{display[index]} {' '.join(dates)}", options=dates)
+            reply = answered(item, answers)
+            if reply not in dates:
+                issues.append(item)
+                reply = dates[0]
+            dates = [reply]
+        entry["date"] = date.fromisoformat(dates[0])
+    return {"receipts": receipts, "deposits": deposits, "questions": issues}

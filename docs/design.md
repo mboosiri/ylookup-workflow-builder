@@ -1,5 +1,21 @@
 # Design
 
+The criterion is the builder, not this spreadsheet. Code holds only general tools and checks; what
+the job is (output tables and headers, which input columns mean what, the steps, the conventions)
+is learned from the input, the completed target and the customer's description, and stored in
+`workflow.json`.
+
+| Knowledge | Where it comes from |
+|---|---|
+| Output tables, their headers, which columns get filled | Diff of the input against the target (`learn_outputs`) |
+| Rows per entry and what an entry iterates over | Row counts that fit (`fits`: e.g. 10 records × 2 lines) |
+| What each output column means | Candidate expressions verified against every target row (`explain`) |
+| The steps and their order | The model, from the tool catalogue and the evidence |
+| Matching policy, which rows to include | The model, from the customer's description and the name-matching evidence |
+| Run-time checks (debit flags, counters, balances, lookups) | Conventions every target row follows (`learn_checks`, `survey`) |
+| Where tables and columns are in a new input | Header fingerprints saved at build time |
+| Policies (e.g. currency) | A person's recorded answers |
+
 ## How a saved workflow produces the output
 
 There is no model in this path. Phase 2 runs only this; Phase 3 runs it first.
@@ -9,47 +25,56 @@ sequenceDiagram
     actor User
     participant CLI as ylookup run / UI
     participant Runner as run_workflow
-    participant Sources as prepare_sources
-    participant Journal as emit_journal + checks
-    participant Writer as write_workbook
+    participant Sources as bind_tables + statement
+    participant Plan as execute_plan
+    participant Checks as check_outputs
+    participant Writer as write_outputs
 
     User->>CLI: workflow.json + input.xlsx + bank.pdf
-    CLI->>Runner: plan, accepted answers, required fields, build-time bindings
-    Runner->>Sources: find tables by header meaning (not tab name or cell)
-    Sources->>Sources: parse PDF deposits, match payer names
-    Sources->>Sources: numeric rule: outstanding = called − received
-    alt unresolved table, payer or currency
-        Sources-->>User: needs_input + questions.json (no workbook)
+    CLI->>Runner: plan, tables, outputs, checks, recorded answers
+    Runner->>Sources: find each table by its header fingerprint (not tab name or cell)
+    alt a table or header is not found
+        Sources-->>User: question with candidates (or run ylookup adapt)
     end
-    Runner->>Journal: 26 field expressions × 2 lines × each investor
-    Journal->>Journal: required fields, debit/credit pairs, accounts, totals, refs
+    Runner->>Plan: each step: match_receipts, fill_columns, append_rows
+    Plan->>Plan: expressions per column and line; doubt becomes a question
+    alt unanswered question (unmatched payment, blank value, currency)
+        Plan-->>User: asks at the terminal, or questions.json; no workbook
+    end
+    Runner->>Checks: learned conventions on every output row
     alt a check fails
-        Journal-->>User: needs_input / stopped + reason (no workbook)
+        Checks-->>User: stopped + the convention broken; no workbook
     end
-    Runner->>Writer: staging, tracker, DIU into a NEW file
+    Runner->>Writer: outputs into a NEW file (output tables must start empty)
     Writer->>Writer: reopen and compare with in-memory values
-    Writer-->>User: output.xlsx + binding changes + events.jsonl
+    Writer-->>User: output.xlsx + layout changes + events.jsonl
 ```
 
 ## How the workflow is built (Phase 1)
 
 ```mermaid
 sequenceDiagram
+    actor Person
     participant Builder
     participant Model as LLM (Qwen3 30B)
     participant Code as execute + compare
 
-    Builder->>Builder: read sources, raise source questions (e.g. EUR vs USD)
-    Builder->>Builder: learn required fields from target
-    Builder->>Model: masked evidence + context + JSON schema
+    Builder->>Builder: find tables; diff input vs target -> outputs
+    Builder->>Builder: name-matching evidence, fits, candidate expressions, checks
+    Builder->>Person: code's questions (e.g. EUR statement vs USD tracker)
+    Person-->>Builder: answer (recorded in the workflow)
+    Builder->>Model: masked evidence + customer description + JSON schema
     loop max 5 calls
-        Model-->>Builder: plan (or a question)
-        Builder->>Builder: restore locked fields (matched on every row before)
-        Builder->>Code: validate, execute, compare with target
-        alt 0 differences
+        Model-->>Builder: plan, or a question
+        opt question
+            Builder->>Person: ask
+            Person-->>Model: answer
+        end
+        Builder->>Code: repair common slips, restore locked columns, validate, run, compare, check
+        alt matches the target
             Code-->>Builder: save workflow.json
-        else differences / invalid plan
-            Code-->>Model: per field: rows wrong, 3 examples, your expression, locked fields
+        else differences
+            Code-->>Model: per column and line: rows wrong, examples, your expression, verified candidates
         end
     end
 ```
@@ -61,39 +86,35 @@ sequenceDiagram
     participant Adapt as ylookup adapt
     participant Runner as run_workflow
     participant Model as LLM (Qwen3 30B)
-    participant Code as verify
+    participant Code as mapping_problem
+    actor Person
 
     Adapt->>Runner: run the saved workflow as is
     alt success
         Runner-->>Adapt: fits, no update (moves listed)
     end
-    Adapt->>Adapt: missing fields = known label not in the table's header row
-    alt no unrecognised header left
-        Adapt-->>Adapt: column_missing question, no model call
+    Runner-->>Adapt: column_mapping / table_choice questions with candidates
+    Adapt->>Model: old header, how the workflow uses it, candidate value types (no private data)
+    Model-->>Adapt: header or null per column
+    Adapt->>Code: real candidate? used once? same value types? written column empty? only one fits?
+    alt rejected or unsure
+        Code->>Person: question with the reason and the candidates
     end
-    Adapt->>Model: field meanings + candidate headers + value types (no data)
-    Model-->>Adapt: header or null per field
-    Adapt->>Code: real candidate? used once? right type? written column empty? only one fits?
-    alt any doubt
-        Code-->>Adapt: column_mapping questions with candidates
-    end
-    Adapt->>Runner: re-run every check with the new mapping
-    Runner-->>Adapt: save workflow.json v+1 with mapping and decided_by
+    Adapt->>Runner: re-run every step and learned check with the mapping
+    Runner-->>Adapt: save workflow.json v+1 with new headers and decided_by
 ```
 
-## What's in `workflow.json`
+## What's in `workflow.json` (schema 3)
 
 | Key | Meaning |
 |---|---|
-| `plan.steps` | Ordered operations, each with an intent |
-| `plan.numeric_rule` | e.g. `outstanding = called − received` |
-| `plan.matching_policy` | `full_name_only` or `full_or_unique_prefix` |
-| `plan.journal.fields` | One expression per DIU header: source field, literal, per-line choice, concatenation or account lookup |
-| `accepted_answers` | User decisions (e.g. the currency policy) |
-| `checks.required_fields` | DIU fields the target always fills, per line; learned at build time |
-| `bindings` | Where each table was found at build time; used to report moves |
-| `headers` | Header label seen for each source field; adapt extends it |
-| `workflow_version`, `adaptations` | Version, plus each adapt's mapping (from, to, `decided_by`) |
+| `plan.intent`, `plan.steps` | The steps, each a tool (`match_receipts`, `fill_columns`, `append_rows`) with an intent |
+| `plan.steps[].columns` | One expression per output column: a column, a receipt field, a counter, a unit, a lookup, a concatenation, arithmetic, a per-line choice or a literal |
+| `tables` | Each table the plan uses: build-time sheet, header fingerprint, and per column its header, value types and position |
+| `outputs` | What the job produces: rows appended to a table, or columns filled in its records |
+| `checks` | Conventions learned from the target: required/blank per line, constant template values, one value per line, equal across an entry, counters, totals that tie to receipts, lookups and relations |
+| `answers` | Policy answers a person gave (id, question, answer) |
+| `workflow_version`, `adaptations` | Version, and each adapt's mapping (from, to, `decided_by`) |
 
 It stores no cell addresses and no answer rows.
 
@@ -101,41 +122,52 @@ It stores no cell addresses and no answer rows.
 
 | Decision | Alternatives considered | Why |
 |---|---|---|
-| The model writes a small JSON plan; code executes it | Model writes Python or Excel formulas; model fills cells directly | A model under 35B is unreliable at arithmetic and long outputs. A plan can be validated, replayed and diffed. |
+| Code learns the outputs by diffing input and target | Hand-written output schema (the old fixed DIU headers) | Works for any template; nothing about DIU is in the code. Tests use a different template. |
+| Code proposes verified candidates; the model composes | Model infers every mapping from raw rows; code synthesises the whole plan | A 30B model is weak at searching 26 columns × 20 rows, but good at choosing and composing. Code's search is exact and cheap. The model still chooses steps, policies, iterations and expressions. |
+| A small typed plan language, executed by code | Model writes Python or formulas; model fills cells | A plan can be validated, replayed, diffed and adapted. |
+| Checks mined from the target | Hand-written journal rules (the old Yes/No, 1/2, investor line) | Generic and they come from evidence. A template constant is checked by value only when no input value explains it. |
 | No model at run time | An agent re-solves each run | Reproducible, free, no drift. The workflow is the contract. |
-| Find tables by header meaning | Fixed tab and cell addresses; model mapping on every run | Survives renamed tabs and reordered columns without a model call. |
-| Compare business values, not formulas | Clone the target's formulas and helper columns | The accounting upload consumes values. |
-| Code detects ambiguity and asks | Let the model decide when to ask | The small model asked bogus questions. Conflicts such as EUR vs USD, duplicate payers or missing columns are detected deterministically. |
-| Required fields learned from the target | Hand-written per-field rules | Generic. Stops blank uploads instead of writing them. |
-| Strict JSON schema plus local validation | Free text; tool calling | The schema shapes the output, and local checks catch what it can't (e.g. wrong amounts). |
-| Lock fields that already match | Let the model rewrite the whole plan each call | The model used to break correct fields while fixing others. |
-| Adapt: model proposes, code verifies | Model decides alone; fuzzy string match | Code catches a wrong-type or reused pick. A column the workflow writes must be empty, and a tie between empty columns goes to a person: a live run once mapped onto a column that held data. |
-| Qwen3-30B-A3B | Mistral Small 3.2 24B | Mistral did not pass a full build in testing. |
-| Mask names, dates and codes before sending | Send raw data | Privacy by default. Cost: longer prompt rules. |
-| CLI + Streamlit | Web app; notebook | Least code for file picking, tables and downloads, and it reuses the CLI functions. |
+| Tables found by header fingerprint, best match first | Fixed tab and cell addresses; alias lists | Renamed tabs and reordered columns need nothing. A renamed header cannot pull in the wrong table, because the other headers or the sheet name still identify it. |
+| Each source column has one key | One field per role (the old `constants.*` and `fund.*` duplicates) | The duplicates made a correct mapping fail "same header chosen for two fields". |
+| Questions are general: stable id, options when code can act | Only a currency answer type; pre-written answers file | Any step can ask; the terminal and UI prompt; policy answers are stored in the workflow. |
+| Repair a few model slips; reject the rest with precise reasons | Reject everything | The model often writes `{"line": [x]}`, a string `"{col: X}"`, or pastes a candidate list into `line`. The repairs keep the meaning and are validated afterwards. |
+| If the model resends a failing choice, adopt the only verified one | Keep asking the model | When code verified exactly one expression (or iteration) on every row and the model repeats a failing one, code uses it and logs `adopted_candidates`. |
+| Lock columns that already match | Let the model rewrite the whole plan | The model used to break correct columns while fixing others. |
+| Adapt: model proposes, code verifies, a person settles ties | Model decides alone; fuzzy string match | Code rejects a wrong-type or reused pick. A written column must be empty, and a tie between empty columns goes to a person. |
+| Qwen3-30B-A3B | Mistral Small 3.2 24B | Mistral did not pass a full build in earlier testing. |
+| Mask private values before sending | Send raw data | Names, the fund, bank references and dates become tokens. Reference tables (over 50 rows, e.g. the chart) stay readable. |
+| CLI + Streamlit | Web app; notebook | Least code for file picking, prompts, tables and downloads; reuses the CLI functions. |
 
 ## Assumptions
 
-- EUR receipts are posted as USD amounts without FX, as the target does. This is an explicit, recorded answer.
-- Non-payers get zero-value journal pairs, as in the target.
-- Short payments (5 and 20) remain outstanding. They are not treated as fees.
-- One receipt per investor. Repeated payments and withdrawals stop for review.
+- EUR receipts are posted as USD amounts without FX, as the target does. This is a person's recorded answer, not a rule in code.
+- One header row per table; the table ends at the first blank row. Units rows (e.g. `USD`) sit between header and records.
+- The record key is the first column with distinct text (an ID or a name).
+- Appended output tables are empty in the input; filled columns are empty in the records.
 - The bank PDF has a text layer with Date / Description / Withdrawal / Deposit / Balance columns.
 - The input was saved by Excel, so formula results are cached.
-- The fund-constants table has a single row.
-- DIU headers are fixed: the upload template is strict.
+- A completed example shows every convention it relies on; one example can make a coincidence look like a rule (see limitations).
 
 ## Known limitations
 
-- **Build reliability:** the model succeeds in 4 of 5 live builds on the current prompt (v13), usually needing all 5 calls; across all rounds since R05 the rate is 13 of 20 (it was 1 of 18 before). The remaining failure left one field wrong on every row (Batch Index). A failed build saves nothing.
-- **Adapt handles renamed or moved columns only.** A removed column, or a new kind of table, stops and asks.
-- `learned_headers` changes module-level alias sets during a run, so it is not thread-safe.
-- **No formula recalculation.** An input saved without cached results stops.
-- **Questions:** only the currency answer type is supported. The CLI stops rather than prompting; the UI prompts.
-- Journal pair rules (`Is Debit` Yes/No, `Trans Index` 1/2) are written for this double-entry template.
+- **Build reliability (live):** 20 of 20 on the final code, each in 1–3 model calls (about $0.002
+  each), plus interactive builds. 16 succeeded on the model's choices alone; in the other 4 the
+  model resent failing expressions for a few columns (`Withdrawal`, `Batch Index`, `Investor
+  Domain`, once the DIU iteration), and code adopted the single verified candidate (`adopted_candidates` in `events.jsonl`). Earlier rounds, without the hints, while the repairs were added:
+  1/5, 4/5, 8/8, 8/8, 9/10, 10/10, 6/10, 10/10, 9/10, 10/10. The failures were one-item `line`,
+  string expressions, circular lookups, and iterating payers only. A failed build saves nothing.
+- **Adapt is conservative.** On an empty renamed column (`Value Date`) or two similar numeric
+  columns, the model often asks instead of mapping; a person answers at the prompt.
+- **Learned checks come from one example.** A convention that holds by coincidence in the target becomes a check. More examples would remove such false rules; today they can only make a run stop, never write a wrong value.
+- **Candidate search is bounded:** single references, lookups keyed by another output column, a prefix/suffix concatenation of one reference, and one add/subtract.
+  A column needing more (e.g. a three-term formula) gets examples, and the model must build it.
+- **Partial-name matching** is first name plus a surname prefix. A different investor with the same first name and a similar surname (e.g. "Daniel Brown" for "DANIEL BRO") would match; a unique full-name match always wins.
+- **Adapt handles renamed and moved columns and tables.** A removed column stops with an explanation; a new kind of table is ignored.
+- **No formula recalculation.** An input saved without cached results asks for each blank value.
+- The privacy split (tables of at most 50 records are private) is a heuristic.
 
 ## With more time
 
-1. Raise build reliability: a larger model, or more calls with smarter feedback.
-2. A benchmark of several workflows and stress variants, reporting the success rate per change.
+1. A benchmark of several workflows and stress variants, scoring every prompt or code change by success rate and model calls.
+2. Several completed examples per build, to separate rules from coincidences in the learned checks.
 3. Formula recalculation, e.g. LibreOffice headless.

@@ -1,8 +1,0 @@
-{
-  "currency_conflict": {
-    "decision": "reproduce_tracker_amounts_without_fx",
-    "statement_currency": "EUR",
-    "tracker_currency": "USD",
-    "reason": "Explicit exercise assumption: reproduce the target's USD-labelled amounts without FX conversion. This does not establish an exchange rate or approve a real posting."
-  }
-}

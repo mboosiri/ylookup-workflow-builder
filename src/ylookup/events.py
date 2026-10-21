@@ -23,7 +23,7 @@ class Events:
     def emit(self, event, **payload):
         item = {"run_id": self.directory.name, "sequence": self.sequence + 1,
                 "event": event, **payload}
-        line = redact(json.dumps(item, allow_nan=False), self.secrets)
+        line = redact(json.dumps(item, allow_nan=False, default=str), self.secrets)
         with self.path.open("a", encoding="utf-8") as stream:
             stream.write(line + "\n")
         self.sequence += 1

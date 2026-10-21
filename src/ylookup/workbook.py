@@ -1,6 +1,5 @@
-"""Strict business tables and safe workbook output with unchanged formula caches."""
+"""Write learned outputs into a copy of the input, read them back, and compare. Formula caches are kept."""
 
-from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal
 import os
@@ -12,157 +11,115 @@ import zipfile
 
 from openpyxl import load_workbook
 
-from .sources import ALIASES, money, normalise
+from .sources import bind_tables, canon, equivalent, find_tables, sheet_rows
 
 
-HEADERS = ["Legal Entity", "Legal Entity Domain", "Deal", "Position", "Batch Index",
-           "Batch Type", "JE Index", "Trans Index", "GL Date", "Effective Date",
-           "Transaction Currency", "Allocation Rule", "Transaction Type", "Account",
-           "Is Debit", "Amount (Local)", "Amount (LE)", "Transaction Comments",
-           "Batch Comments", "Bank Account", "Investor", "Investor Domain", "Vehicle",
-           "Investor Amount (LE)", "Investor Amount (Local)", "Transaction GL Reference"]
-STAGING = {"date": {"date", "transaction date"},
-           "description": {"line item description", "description", "bank reference"},
-           "withdrawal": {"withdrawal", "debit"}, "deposit": {"deposit", "credit"},
-           "investor": {"matched investor", "matched investor name"}}
-TRACKER = {"received": {"amount received", "cash collected", "money received"},
-           "outstanding": {"amount outstanding", "outstanding", "balance due"},
-           "receipt_date": {"date as per bank statement", "receipt date", "payment date"}}
-FUND = {"entity": {"legal entity", "fund name"}, "entity_domain": {"legal entity domain"},
-        "deal": {"deal"}, "position": {"position"}, "batch_type": {"batch type"},
-        "bank_account": {"bank account", "bank account name"}}
+def plain(value):
+    """JSON value that keeps the type visible, so 1 and "1" stay distinguishable in feedback."""
+    if isinstance(value, dict):
+        return {k: plain(v) for k, v in value.items()}
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return value if value is None or isinstance(value, (bool, int, float, str)) else str(value)
 
 
-# Workflow header names are "table.field"; each maps onto the alias sets that recognise it.
-TABLES = {"roster": ALIASES, "accounts": ALIASES, "constants": ALIASES,
-          "tracker": TRACKER, "fund": FUND, "staging": STAGING}
+def output_spec(spec):
+    """Only the output tables and their columns, for reading a target or a written workbook."""
+    return {"outputs": spec["outputs"], "tables": {key: {**spec["tables"][key], "columns": {
+        name: spec["tables"][key]["columns"][name] for name in out["columns"]}} for key, out in spec["outputs"].items()}}
 
 
-def alias_sets(name):
-    table, field = name.split(".", 1)
-    sets = [TABLES[table][field]]
-    if table in {"tracker", "fund"} and field in ALIASES:
-        sets.append(ALIASES[field])
-    return sets
-
-
-@contextmanager
-def learned_headers(headers):
-    """Recognise the header names a workflow has learned, for the duration of one run."""
-    # mutates module-level alias sets, so one run per process at a time; pass aliases explicitly if runs go concurrent.
-    added = []
-    for name, label in headers.items():
-        if not isinstance(label, str) or not normalise(label):
-            continue
-        for names in alias_sets(name):
-            if normalise(label) not in names:
-                names.add(normalise(label))
-                added.append((names, normalise(label)))
-    try:
-        yield
-    finally:
-        for names, label in added:
-            names.discard(label)
-
-
-def observed_labels(path, evidence):
-    """Header text seen for each bound field at build time, stored in the workflow."""
-    book = load_workbook(path, read_only=True, data_only=True)
-    try:
-        labels = {}
-        for role, binding in evidence["bindings"].items():
-            values = next(book[binding["sheet"]].iter_rows(min_row=binding["header_row"], max_row=binding["header_row"], values_only=True))
-            for field, column in binding["columns"].items():
-                labels[f"{role}.{field}"] = values[column - 1]
-            extra = {"roster": ("tracker", TRACKER), "constants": ("fund", FUND)}.get(role)
-            if extra:
-                for field, aliases in extra[1].items():
-                    found = [v for v in values if v is not None and normalise(v) in aliases]
-                    if len(found) == 1:
-                        labels[f"{extra[0]}.{field}"] = found[0]
-        sheet, row, mapping = find_table(book, meanings=STAGING)
-        values = next(sheet.iter_rows(min_row=row, max_row=row, values_only=True))
-        labels.update({f"staging.{field}": values[column - 1] for field, column in mapping.items()})
-        return labels
-    finally:
-        book.close()
-
-
-def columns(values, meanings):
+def read_outputs(path, spec):
+    """Output tables of a workbook: appended rows as a list, filled columns by record key."""
+    narrowed = output_spec(spec)
+    bound, problems = bind_tables(narrowed, find_tables(sheet_rows(path)))
+    if problems:
+        raise ValueError("Output tables not found in " + Path(path).name + ": " + "; ".join(p["question"] for p in problems))
     result = {}
-    for role, aliases in meanings.items():
-        choices = [i for i, value in enumerate(values, 1) if value is not None and normalise(value) in aliases]
-        if len(choices) != 1:
-            raise ValueError(f"Cannot find exactly one '{role}' column (found {len(choices)}); "
-                             f"recognised headers: {sorted(aliases)}.")
-        result[role] = choices[0]
+    for key, out in spec["outputs"].items():
+        table = bound[key]
+        if out["op"] == "append_rows":
+            result[key] = [{c: r["values"][c] for c in out["columns"]} for r in table["all"]]
+        else:
+            result[key] = {canon(r["key"]) or r["row"]: {c: r["values"][c] for c in out["columns"]} for r in table["records"]}
     return result
 
 
-def find_table(book, meanings=None, exact=None):
-    candidates = []
-    for sheet in book:
-        for index, row in enumerate(sheet.iter_rows(values_only=True), 1):
-            if exact is not None:
-                if list(row[:len(exact)]) == exact and not any(v is not None for v in row[len(exact):]):
-                    candidates.append((sheet, index, {name: i for i, name in enumerate(exact, 1)}))
-            else:
-                try:
-                    mapped = columns(row, meanings)
-                except ValueError:
-                    continue
-                candidates.append((sheet, index, mapped))
-    if len(candidates) != 1:
-        raise ValueError("Missing or competing output table; a unique supported header is required.")
-    return candidates[0]
+def compare_outputs(actual, expected):
+    differences = []
+    for key, want in expected.items():
+        got = actual.get(key, [] if isinstance(want, list) else {})
+        if isinstance(want, list):
+            if len(got) != len(want):
+                differences.append({"table": key, "check": "row_count", "actual": len(got), "expected": len(want)})
+            pairs = list(enumerate(zip(got, want), 1))
+        else:
+            if set(got) != set(want):
+                differences.append({"table": key, "check": "records", "actual": sorted(map(str, got)), "expected": sorted(map(str, want))})
+            pairs = [(record, (got[record], want[record])) for record in want if record in got]
+        for row, (g, w) in pairs:
+            for column in w:
+                if not equivalent(g.get(column), w[column]):
+                    differences.append({"table": key, "row": row, "column": column,
+                                        "actual": plain(g.get(column)), "expected": plain(w[column])})
+    return differences
 
 
-def fund_values(path, evidence):
-    if len(evidence["constants"]) != 1:
-        raise ValueError("Choose a unique fund constants record before generating journals.")
-    binding = evidence["bindings"]["constants"]
-    row_number = evidence["constants"][0]["source"]["row"]
-    book = load_workbook(path, read_only=True, data_only=True)
+def put(cell, value):
+    cell.value = value
+    if isinstance(value, str):
+        cell.data_type = "s"  # never let a text value starting with "=" become a formula
+    elif isinstance(value, date) and cell.number_format == "General":
+        cell.number_format = "yyyy-mm-dd"
+
+
+def write_outputs(source, destination, bound, outputs):
+    """A new workbook: appended tables written under their header, filled columns at their records.
+
+    Appending needs empty rows under the header; existing rows stop the run instead of being deleted.
+    """
+    destination = Path(destination)
+    if destination.exists() or destination.resolve() == Path(source).resolve():
+        raise ValueError("Output must be a new path; original workbooks are never overwritten.")
+    book = load_workbook(source, data_only=False)
     try:
-        sheet = book[binding["sheet"]]
-        headers = next(sheet.iter_rows(min_row=binding["header_row"], max_row=binding["header_row"], values_only=True))
-        values = next(sheet.iter_rows(min_row=row_number, max_row=row_number, values_only=True))
-        result = {}
-        for key, aliases in FUND.items():
-            matches = [i for i, value in enumerate(headers) if value is not None and normalise(value) in aliases]
-            if len(matches) > 1:
-                raise ValueError(f"Competing fund field {key}.")
-            value = values[matches[0]] if matches else None
-            if value is not None and not isinstance(value, str):
-                raise ValueError(f"Fund field {key} requires a text value; clarify numeric identifiers before planning.")
-            result[key] = value
-        return result
+        for key, out in outputs.items():
+            table, sheet = bound[key], book[bound[key]["sheet"]]
+            columns = table["columns"]
+            if out["op"] == "append_rows":
+                first = table["row"] + 1
+                taken = [r for r in range(first, first + len(out["rows"]))
+                         if any(sheet.cell(r, c + 1).value is not None for c in columns.values())]
+                if taken:
+                    raise ValueError(f"{key} must be empty under its header, but rows {taken[:5]} already hold data; nothing was written.")
+                for offset, row in enumerate(out["rows"], first):
+                    for name, value in row.items():
+                        put(sheet.cell(offset, columns[name] + 1), value)
+                continue
+            for ctx, row in zip(out["contexts"], out["rows"]):
+                for name, value in row.items():
+                    put(sheet.cell(ctx["record"]["row"], columns[name] + 1), value)
+            # A summary row of =SUM formulas right after the records gets totals for the filled numbers.
+            total = next((p for p in table["post"] if any(isinstance(f, str) and f.upper().startswith("=SUM(")
+                                                          for f in p["formulas"])), None)
+            if total:
+                for name in out["rows"][0] if out["rows"] else []:
+                    numbers = [row[name] for row in out["rows"]]
+                    cell = sheet.cell(total["row"], columns[name] + 1)
+                    if cell.value is None and all(isinstance(v, (int, float, Decimal)) and not isinstance(v, bool) for v in numbers):
+                        cell.value = sum(Decimal(str(v)) for v in numbers)
+        with tempfile.TemporaryDirectory(dir=destination.parent) as directory:
+            raw, ready = Path(directory) / "raw.xlsx", Path(directory) / "ready.xlsx"
+            book.save(raw)
+            restore_caches(source, raw, ready)
+            os.link(ready, destination)
     finally:
         book.close()
-
-
-def business_tables(path, evidence):
-    book = load_workbook(path, read_only=True, data_only=True)
-    try:
-        sheet, header, _ = find_table(book, exact=HEADERS)
-        journal = [dict(zip(HEADERS, row[:len(HEADERS)]))
-                   for row in sheet.iter_rows(min_row=header + 1, values_only=True)
-                   if any(value is not None for value in row)]
-        sheet, header, mapping = find_table(book, meanings=STAGING)
-        staging = [{key: row[col - 1] for key, col in mapping.items()}
-                   for row in sheet.iter_rows(min_row=header + 1, values_only=True)
-                   if any(row[col - 1] is not None for col in mapping.values())]
-        binding = evidence["bindings"]["roster"]
-        sheet = book[binding["sheet"]]
-        values = next(sheet.iter_rows(min_row=binding["header_row"], max_row=binding["header_row"], values_only=True))
-        mapping = columns(values, TRACKER)
-        tracker = []
-        for investor in evidence["roster"]:
-            row = next(sheet.iter_rows(min_row=investor["source"]["row"], max_row=investor["source"]["row"], values_only=True))
-            tracker.append({"id": investor["id"], **{key: row[col - 1] for key, col in mapping.items()}})
-        return {"journal": journal, "staging": staging, "tracker": tracker}
-    finally:
-        book.close()
+    return destination
 
 
 def sheet_parts(archive):
@@ -207,94 +164,3 @@ def restore_caches(original, generated, destination):
         with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as result:
             for item in edited.infolist():
                 result.writestr(item, replacements.get(item.filename, edited.read(item.filename)))
-
-
-def write_workbook(source, destination, evidence, journal):
-    destination = Path(destination)
-    if destination.exists() or destination.resolve() == Path(source).resolve():
-        raise ValueError("Output must be a new path; original workbooks are never overwritten.")
-    book = load_workbook(source, data_only=False)
-    try:
-        sheet, header, mapping = find_table(book, meanings=STAGING)
-        if sheet.max_row > header:
-            sheet.delete_rows(header + 1, sheet.max_row - header)
-        names = {row["id"]: row["name"] for row in evidence["roster"]}
-        for offset, receipt in enumerate(evidence["transactions"], header + 1):
-            values = {"date": date.fromisoformat(receipt["date"]), "description": receipt["description"],
-                      "withdrawal": None, "deposit": Decimal(receipt["amount"]),
-                      "investor": names[receipt["investor_id"]]}
-            for key, column in mapping.items():
-                cell = sheet.cell(offset, column, values[key])
-                if isinstance(values[key], str):
-                    cell.data_type = "s"
-        binding = evidence["bindings"]["roster"]
-        sheet = book[binding["sheet"]]
-        mapping = columns([c.value for c in sheet[binding["header_row"]]], TRACKER)
-        for row in evidence["tracker"]:
-            for key, column in mapping.items():
-                value = date.fromisoformat(row[key]) if key == "receipt_date" and row[key] else None if key == "receipt_date" else Decimal(row[key])
-                cell = sheet.cell(row["source"]["row"], column)
-                cell.value = value
-                cell.number_format = "yyyy-mm-dd" if key == "receipt_date" else "#,##0.00"
-        total_row = max(row["source"]["row"] for row in evidence["tracker"]) + 1
-        summary = sheet.cell(total_row, binding["columns"]["called"]).value
-        if isinstance(summary, str) and summary.upper().startswith("=SUM("):
-            for key in ["received", "outstanding"]:
-                sheet.cell(total_row, mapping[key], sum(Decimal(row[key]) for row in evidence["tracker"]))
-        sheet, header, _ = find_table(book, exact=HEADERS)
-        if sheet.max_row > header:
-            sheet.delete_rows(header + 1, sheet.max_row - header)
-        for index, row in enumerate(journal, header + 1):
-            for column, field in enumerate(HEADERS, 1):
-                value = row[field]
-                if field in {"GL Date", "Effective Date"} and value:
-                    value = date.fromisoformat(value)
-                elif "Amount" in field and value is not None:
-                    value = Decimal(str(value))
-                cell = sheet.cell(index, column, value)
-                if isinstance(value, str):
-                    cell.data_type = "s"
-        with tempfile.TemporaryDirectory(dir=destination.parent) as directory:
-            raw, ready = Path(directory) / "raw.xlsx", Path(directory) / "ready.xlsx"
-            book.save(raw)
-            restore_caches(source, raw, ready)
-            os.link(ready, destination)
-    finally:
-        book.close()
-    return destination
-
-
-def equivalent(actual, expected, field):
-    if actual in (None, "") or expected in (None, ""):
-        return actual in (None, "") and expected in (None, "")
-    if "amount" in field.lower() or field in {"received", "outstanding", "deposit", "withdrawal"}:
-        try:
-            return money(actual) == money(expected)
-        except (ValueError, ArithmeticError):
-            return False
-    if "date" in field.lower():
-        def day(value):
-            return value.date().isoformat() if isinstance(value, datetime) else value.isoformat() if isinstance(value, date) else str(value)
-        return day(actual) == day(expected)
-    if field == "description":
-        # Bank export formatting may split references; retain every letter/digit.
-        return "".join(c for c in normalise(actual) if c.isalnum()) == "".join(c for c in normalise(expected) if c.isalnum())
-    return actual == expected
-
-
-def plain(value):
-    """JSON value that keeps the type visible, so 1 and "1" stay distinguishable in feedback."""
-    return value if value is None or isinstance(value, (bool, int, float, str)) else str(value)
-
-
-def compare_tables(actual, target):
-    differences = []
-    for table in ["journal", "tracker", "staging"]:
-        if len(actual[table]) != len(target[table]):
-            differences.append({"table": table, "check": "row_count", "actual": len(actual[table]), "expected": len(target[table])})
-        for index, (got, expected) in enumerate(zip(actual[table], target[table]), 1):
-            for field in sorted(got.keys() | expected.keys()):
-                if not equivalent(got.get(field), expected.get(field), field):
-                    differences.append({"table": table, "row": index, "field": field,
-                                        "actual": plain(got.get(field)), "expected": plain(expected.get(field))})
-    return differences

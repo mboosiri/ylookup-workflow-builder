@@ -7,14 +7,14 @@ import time
 import streamlit as st
 
 from ylookup.adapt import PROMPT_VERSION as ADAPT_PROMPT_VERSION, adapt_workflow
-from ylookup.builder import MAX_ATTEMPTS, build_workbook
+from ylookup.builder import MAX_ATTEMPTS, PROMPT_VERSION, build_workflow
 from ylookup.events import Events
 from ylookup.model import OpenRouter, settings
-from ylookup.planner import PROMPT_VERSION, run_workflow
+from ylookup.planner import run_workflow
 
 RUNS = Path("runs")
 UPLOADS = Path("data/uploads")
-CURRENCY_DECISION = "reproduce_tracker_amounts_without_fx"
+OTHER = "Other (type below)"
 
 
 def local_files(suffix):
@@ -56,10 +56,18 @@ def download(label, path, key):
         st.download_button(label, path.read_bytes(), file_name=path.name, key=key)
 
 
-def show_questions(questions):
-    st.dataframe([{"code": q.get("code"), "question": q.get("question"),
-                   "detail": {k: v for k, v in q.items() if k not in {"code", "question"}}} for q in questions],
-                 width="stretch")
+def answer_questions(questions, key):
+    """Any question: pick an option or type an answer. Answers are kept by question id and sent on the next run."""
+    answers = st.session_state.setdefault("answers", {})
+    for item in questions:
+        st.write(f"**{item['question']}**")
+        options = item.get("options") or []
+        choice = st.radio("Answer", options + [OTHER], key=f"{key}-{item['id']}", label_visibility="collapsed") if options else OTHER
+        text = st.text_input("Your answer", key=f"{key}-{item['id']}-text") if choice == OTHER else choice
+        if text:
+            answers[item["id"]] = {"question": item["question"], "answer": text}
+    if questions:
+        st.caption("Answers are kept for this session; run again to use them.")
 
 
 def attempts_table(run_dir):
@@ -89,11 +97,16 @@ def show_run_result(result, key):
         st.info("Source layout changed since build (resolved by meaning):\n\n- " + "\n- ".join(result["binding_changes"]))
     if result.get("reason"):
         st.write(result["reason"])
+    for failure in result.get("check_failures", []):
+        st.write("- " + failure)
     if result.get("questions"):
-        show_questions(result["questions"])
+        answer_questions(result["questions"], key)
     if result["status"] == "success" and result.get("output"):
-        st.caption(f"{result['journal_rows']} DIU rows written to `{result['output']}`")
-        st.dataframe(json.loads((run_dir / "journal.json").read_text()), width="stretch")
+        st.caption(f"Rows written: {result['rows']} to `{result['output']}`")
+        outputs = json.loads((run_dir / "outputs.json").read_text())
+        for table, rows in outputs.items():
+            with st.expander(f"{table} ({len(rows)} rows)", expanded=len(rows) == max(map(len, outputs.values()))):
+                st.dataframe(rows, width="stretch")
         download("Download output.xlsx", result["output"], key + "-dl")
     if result.get("run_dir"):
         st.caption(f"Run folder: `{run_dir}`")
@@ -105,7 +118,7 @@ def run_panel(key, input_hint):
     bank = pick("Bank statement (.pdf)", ".pdf", "", key + "-bank")
     if st.button("Run workflow", type="primary", key=key + "-go", disabled=not (workflow and workbook and bank)):
         try:
-            st.session_state[key] = run_workflow(workflow, workbook, bank, new_run(key))
+            st.session_state[key] = run_workflow(workflow, workbook, bank, new_run(key), answers=st.session_state.answers)
         except Exception as error:
             st.error(f"Run failed: {error}")
     if key in st.session_state:
@@ -154,8 +167,8 @@ with build_tab:
         run_dir = new_run("build")
         with st.spinner("Building: model proposes, code executes and compares…"):
             try:
-                result = build_workbook(workbook, target, bank, context, st.session_state.answers,
-                                        OpenRouter(key, model, PROMPT_VERSION, 3500), Events(run_dir, (key,)), attempts)
+                result = build_workflow(workbook, target, bank, context, st.session_state.answers,
+                                        OpenRouter(key, model, PROMPT_VERSION, 8000), Events(run_dir, (key,)), attempts)
             except Exception as error:
                 result = {"status": "error", "reason": str(error)}
         st.session_state.build = {**result, "run_dir": str(run_dir)}
@@ -168,23 +181,9 @@ with build_tab:
         if table:
             st.subheader("Iterations")
             st.dataframe(table, width="stretch")
-        if result.get("question"):
-            st.write("**Model question:** " + result["question"])
-        for issue in result.get("questions", []):
-            st.write(f"**{issue['code']}**: {issue['question']}")
-            if issue["code"] == "currency_conflict":
-                reason = st.text_area("Reason", "Exercise assumption: reproduce the target's tracker-currency amounts "
-                                      "without FX conversion. Not an exchange rate or approval of a real posting.")
-                label = f"Accept: post {issue['tracker_currency']} amounts, no FX from {issue['statement_currency']}"
-                if st.button(label):
-                    st.session_state.answers["currency_conflict"] = {
-                        "decision": CURRENCY_DECISION, "statement_currency": issue["statement_currency"],
-                        "tracker_currency": issue["tracker_currency"], "reason": reason}
-                    st.success("Answer saved. Click **Build workflow** again.")
-            else:
-                st.json(issue)
+        answer_questions(result.get("questions", []), "b")
         if result["status"] == "success":
-            st.caption(f"Workflow saved to `{result['workflow']}`")
+            st.caption(f"Workflow saved to `{result['workflow']}` after {result['attempts']} model calls")
             st.json(json.loads(Path(result["workflow"]).read_text()), expanded=False)
             download("Download workflow.json", result["workflow"], "b-dl-wf")
             download("Download output.xlsx", result["output"], "b-dl-out")
@@ -200,7 +199,7 @@ def show_adapt_result(result):
     elif result.get("note"):
         st.info(result["note"])
     if result.get("mapping"):
-        st.dataframe([{"field": field, "now reads column": header} for field, header in result["mapping"].items()],
+        st.dataframe([{"column": field, **change} for field, change in result["mapping"].items()],
                      width="stretch")
     if result.get("workflow") and result.get("adapted"):
         download("Download updated workflow.json", result["workflow"], "a-dl-wf")
@@ -219,11 +218,11 @@ with adapt_tab:
         a_bank = pick("Bank statement", ".pdf", "", "a-bank")
         a_context = pick("Customer context", ".txt", "context", "a-ctx")
 
-    def adapt(answers=None):
+    def adapt():
         key, model = settings()
         try:
-            return adapt_workflow(a_workflow, a_input, a_bank, a_context,
-                                  OpenRouter(key, model, ADAPT_PROMPT_VERSION, 1500), new_run("adapt"), answers)
+            return adapt_workflow(a_workflow, a_input, a_bank, a_context, OpenRouter(key, model, ADAPT_PROMPT_VERSION, 1500),
+                                  new_run("adapt"), st.session_state.answers)
         except Exception as error:
             return {"status": "error", "reason": str(error), "run_dir": ""}
 
@@ -231,17 +230,7 @@ with adapt_tab:
         with st.spinner("Running the existing workflow, then adapting if needed…"):
             st.session_state.adapt = adapt()
     if "adapt" in st.session_state:
-        result = st.session_state.adapt
-        show_adapt_result(result)
-        choices = {q["field"]: q["candidates"] for q in result.get("questions", []) if q.get("code") == "column_mapping"}
-        if choices:
-            st.subheader("Answer the mapping questions")
-            answers = {field: st.selectbox(f"Column for {field}", options, key="ans-" + field)
-                       for field, options in choices.items()}
-            if st.button("Apply answers and re-check"):
-                with st.spinner("Verifying your mapping and re-running every check…"):
-                    st.session_state.adapt = adapt(answers)
-                st.rerun()
+        show_adapt_result(st.session_state.adapt)
 
 with runs_tab:
     runs = sorted((p for p in RUNS.glob("*") if (p / "events.jsonl").exists()), key=lambda p: p.stat().st_mtime, reverse=True)

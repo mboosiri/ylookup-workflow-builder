@@ -1,173 +1,152 @@
-import hashlib
-import json
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import time
 import unittest
-from unittest.mock import patch
 
 from openpyxl import Workbook
 
-from ylookup.events import Events
-from ylookup.sources import match_investor, parse_statement, prepare_sources, read_workbook
+from ylookup.sources import (LEAVE, bind_tables, equivalent, find_tables, match_names, match_receipts, parse_statement,
+                             rekey, sheet_rows)
+from fixtures import statement
 
 
-RULE = {"version": 1, "intent": "Remaining amount", "operation": "subtract",
-        "left": "Amount Called", "right": "Amount Received", "output": "Amount outstanding"}
-
-
-def statement(description="REF TAYLOR REE", currency="USD", kind="deposit"):
-    header = f"{'Date':<15}{'Description':<55}{'Withdrawal':>14}{'Deposit':>14}{'Balance':>14}"
-    debit, credit = ("", "95.00") if kind == "deposit" else ("95.00", "")
-    record = f"{'24 Feb 2026':<15}{description:<55}{debit:>14}{credit:>14}{'900.00':>14}"
-    return f"Currency : {currency}\n{header}\n{record}\n   MORE WRAPPED REFERENCE\n   Thank you for banking\n"
-
-
-def workbook(path, renamed=False, missing=False, duplicate=False):
+def table_book(path, far_cell=None):
     book = Workbook()
     sheet = book.active
-    sheet.title = "Partners" if renamed else "Roster"
-    if renamed:
-        sheet.append(["Capital Call Amount", "LP Name", "Partner ID"])
-        sheet.append(["USD", None, None])
-        sheet.append([None if missing else 100, "Taylor Reed", "001"])
-        sheet.append([50, "Morgan Vale", "001" if duplicate else "002"])
-    else:
-        sheet.append(["ID", "Investor", "Amount Called"])
-        sheet.append([None, None, "USD"])
-        sheet.append(["001", "Taylor Reed", None if missing else 100])
-        sheet.append(["001" if duplicate else "002", "Morgan Vale", 50])
-    accounts = book.create_sheet("Lookup renamed" if renamed else "Accounts")
-    accounts.append(["Account Code", "Transaction Type"])
-    accounts.append(["00100.2", "Cash received"])
-    constants = book.create_sheet("Fund constants")
-    constants.append(["Legal Entity", "Bank Account", "Batch Type"])
-    constants.append(["Example fund", "Example account", "General"])
-    blank_output = book.create_sheet("Output template")
-    blank_output.append(["Legal Entity", "Bank Account", "Batch Type"])
+    sheet.title = "Roster"
+    sheet.append(["Notes <== read me"])
+    sheet.append(["ID", "Investor", "Called"])
+    sheet.append([None, None, "USD"])
+    sheet.append(["001", "Taylor Reed", 100])
+    sheet.append([None, None, 7])
+    sheet.append(["002", "Morgan Vale", 50])
+    sheet.append([None, None, "=SUM(C4:C6)"])
+    if far_cell:
+        sheet[far_cell] = "stray"
+    other = book.create_sheet("Lookup")
+    other.append(["Code", "Type"])
+    other.append(["C1", "Cash"])
     book.save(path)
     book.close()
 
 
-class SourcesTest(unittest.TestCase):
-    def test_deposit_is_not_running_balance_and_wrapped_description_is_preserved(self):
+class TablesTest(unittest.TestCase):
+    def test_tables_are_header_rows_with_records_units_totals_and_orphans(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "book.xlsx"
+            table_book(path)
+            roster, lookup = find_tables(sheet_rows(path))
+        self.assertEqual((roster["sheet"], roster["row"], roster["key"]), ("Roster", 2, "ID"))
+        self.assertEqual([r["row"] for r in roster["records"]], [4, 6])
+        self.assertEqual(roster["units"], {"Called": "USD"})
+        self.assertEqual(roster["orphans"], [5])
+        self.assertEqual(roster["post"][0]["formulas"][2], "=SUM(C4:C6)")
+        self.assertEqual(len(lookup["records"]), 1)
+
+    def test_reading_stops_after_a_long_blank_run_so_inflated_sheets_stay_fast(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "book.xlsx"
+            table_book(path, far_cell="A40000")
+            started = time.perf_counter()
+            rows = sheet_rows(path)
+            self.assertLess(time.perf_counter() - started, 2)
+        self.assertLess(max(number for number, *_ in rows["Roster"]), 100)
+
+    def test_tables_bind_by_header_fingerprint_not_tab_name_or_position(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "book.xlsx"
+            table_book(path)
+            found = find_tables(sheet_rows(path))
+        spec = {"outputs": {}, "tables": {
+            "Partners": {"sheet": "Old tab", "headers": ["ID", "Investor", "Called", "Gone"], "columns": {
+                "Investor": {"header": "Investor", "types": ["text"]}, "Called": {"header": "Called", "types": ["number"]}}},
+            "Codes": {"sheet": "Lookup", "headers": ["Account Code", "Movement"], "columns": {
+                "Account Code": {"header": "Account Code", "types": ["text"]}}}}}
+        bound, problems = bind_tables(spec, found)
+        self.assertEqual(bound["Partners"]["sheet"], "Roster")
+        self.assertEqual(bound["Partners"]["records"][0]["values"], {"Investor": "Taylor Reed", "Called": 100})
+        # Every header renamed, but the sheet name still identifies the table; the column is then asked for.
+        self.assertEqual(bound["Codes"]["sheet"], "Lookup")
+        self.assertEqual([(p["code"], p["options"]) for p in problems], [("column_mapping", ["Code", "Type"])])
+        answer = {problems[0]["id"]: "Code"}
+        bound, problems = bind_tables(spec, found, answer)
+        self.assertEqual((problems, bound["Codes"]["records"][0]["values"]), ([], {"Account Code": "C1"}))
+        wrong_type = {"column_mapping:Partners.Called": "Investor"}
+        spec["tables"]["Partners"]["columns"]["Called"]["header"] = "Amount Called"
+        _, problems = bind_tables(spec, found, {**answer, **wrong_type})
+        self.assertIn("was rejected", problems[0]["question"])
+
+    def test_text_comparison_is_exact_for_codes_and_tolerant_for_long_references(self):
+        self.assertFalse(equivalent("10000.2", "100002"))
+        self.assertFalse(equivalent("Yes", "yes"))
+        self.assertFalse(equivalent(1, "1"))
+        self.assertFalse(equivalent(None, 0))
+        self.assertTrue(equivalent(Decimal("95"), 95.0))
+        self.assertTrue(equivalent("", None))
+        long = "TT|03MX260209783088  RDO9 AARON PAT PDF EL|CHASE BANK SG74645658765005HS DE14704456781000045388|SUH68Y90JG95"
+        self.assertTrue(equivalent(long, long.replace("|", " ").replace("RDO9", "RD O9")))
+
+
+class StatementTest(unittest.TestCase):
+    def test_deposit_is_not_running_balance_and_wrapped_description_is_kept(self):
         result = parse_statement([(1, statement())])
         self.assertEqual(result["questions"], [])
         receipt = result["transactions"][0]
-        self.assertEqual(receipt["amount"], "95.00")
-        self.assertEqual(receipt["balance"], "900.00")
-        self.assertEqual(receipt["date"], "2026-02-24")
-        self.assertIn("WRAPPED REFERENCE", receipt["description"])
-        self.assertNotIn("Thank you", receipt["description"])
+        self.assertEqual((receipt["amount"], receipt["balance"], receipt["date"]), ("95.00", "900.00", "2026-02-24"))
+        self.assertEqual(receipt["description"], "REF TAYLOR REE MORE WRAPPED REFERENCE")
 
-    def test_unsupported_layout_and_missing_amount_request_review(self):
-        unsupported = parse_statement([(1, "scanned image without readable table")])
-        self.assertTrue(any(q["code"] == "bank_layout" for q in unsupported["questions"]))
+    def test_unsupported_layout_missing_amount_and_undated_rows_ask(self):
+        self.assertTrue(any(q["code"] == "bank_layout" for q in parse_statement([(1, "scanned image")])["questions"]))
         missing = parse_statement([(1, statement().replace("95.00", "     "))])
         self.assertEqual(missing["transactions"], [])
-        self.assertTrue(any(q["code"] == "receipt_amount" for q in missing["questions"]))
-
-    def test_missing_receipt_date_does_not_merge_money_into_previous_description(self):
         undated = statement().splitlines()[2].replace("24 Feb 2026", "           ")
-        text = statement().replace("   MORE WRAPPED REFERENCE", undated)
-        result = parse_statement([(1, text)])
+        result = parse_statement([(1, statement().replace("   MORE WRAPPED REFERENCE", undated))])
         self.assertEqual(len(result["transactions"]), 1)
         self.assertTrue(any(q["code"] == "receipt_date" for q in result["questions"]))
+        conflict = parse_statement([(1, statement().replace("   MORE WRAPPED REFERENCE", "   EUR|95.00|1.00"))])
+        self.assertTrue(any(q["code"] == "receipt_currency" for q in conflict["questions"]))
 
-    def test_explicit_total_ends_roster_before_footer_notes(self):
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "source.xlsx"
-            workbook(path)
-            from openpyxl import load_workbook
-            book = load_workbook(path)
-            sheet = book["Roster"]
-            sheet.append([None, None, "=SUM(C3:C4)"])
-            sheet.append(["Footer text", "Instructions", "Other content"])
-            book.save(path)
-            book.close()
-            result = read_workbook(path)
-            self.assertEqual(len(result["roster"]), 2)
-            self.assertEqual(result["questions"], [])
 
-    def test_identity_uses_evidence_not_first_match(self):
-        roster = [{"id": "001", "name": "Taylor Reed"}, {"id": "002", "name": "Taylor Reeves"}]
-        matches, method = match_investor("REF TAYLOR REE", roster)
-        self.assertEqual(len(matches), 2)
-        self.assertEqual(method, "first_name_and_surname_prefix")
-        full, method = match_investor("REF Taylor Reed paid", roster)
-        self.assertEqual([row["id"] for row in full], ["001"])
-        self.assertEqual(method, "full_name")
-        self.assertEqual(match_investor("someone unknown", roster)[0], [])
+class MatchTest(unittest.TestCase):
+    def table(self, *names):
+        found = {"sheet": "R", "row": 1, "headers": {0: "Name"}, "key": "Name", "units": {}, "orphans": [], "post": [], "rows": len(names),
+                 "records": [{"row": i + 2, "cells": [n], "formulas": [None]} for i, n in enumerate(names)],
+                 "all": []}
+        return rekey(found, {"Name": 0})
 
-    def test_bindings_follow_renamed_tabs_headers_and_column_order(self):
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "source.xlsx"
-            workbook(path, renamed=True)
-            before = hashlib.sha256(path.read_bytes()).digest()
-            result = read_workbook(path)
-            self.assertEqual(result["questions"], [])
-            self.assertEqual(result["bindings"]["roster"]["sheet"], "Partners")
-            self.assertEqual(result["bindings"]["roster"]["columns"]["id"], 3)
-            self.assertEqual(result["roster"][0]["id"], "001")
-            self.assertEqual(result["accounts"][0]["account"], "00100.2")
-            self.assertEqual(hashlib.sha256(path.read_bytes()).digest(), before)
+    def test_names_match_in_full_or_by_first_name_and_surname_prefix(self):
+        names = {0: "Taylor Reed", 1: "Taylor Reeves"}
+        self.assertEqual(match_names("REF TAYLOR REE", names), ([0, 1], "first_name_and_surname_prefix"))
+        self.assertEqual(match_names("REF Taylor Reed paid", names), ([0], "full_name"))
+        self.assertEqual(match_names("REF TAYLOR REE", names, "full_name_only"), ([], "full_name"))
 
-    def test_missing_amount_and_duplicate_id_are_not_silently_accepted(self):
-        with TemporaryDirectory() as directory:
-            for flag in ["missing", "duplicate"]:
-                path = Path(directory) / (flag + ".xlsx")
-                workbook(path, **{flag: True})
-                self.assertTrue(read_workbook(path)["questions"])
+    def test_doubt_becomes_a_question_and_an_answer_settles_it(self):
+        table = self.table("Taylor Reed", "Taylor Reeves")
+        result = match_receipts(parse_statement([(1, statement())]), table, "Name", "full_or_unique_prefix", {})
+        item = result["questions"][0]
+        self.assertEqual((item["code"], item["options"]), ("receipt_match", ["Taylor Reed", "Taylor Reeves", LEAVE]))
+        settled = match_receipts(parse_statement([(1, statement())]), table, "Name", "full_or_unique_prefix", {item["id"]: "Taylor Reeves"})
+        self.assertEqual(settled["questions"], [])
+        self.assertEqual(settled["receipts"], {1: {"amount": Decimal("95.00"), "description": "REF TAYLOR REE MORE WRAPPED REFERENCE",
+                                                   "date": date(2026, 2, 24)}})
+        left = match_receipts(parse_statement([(1, statement())]), table, "Name", "full_or_unique_prefix", {item["id"]: LEAVE})
+        self.assertEqual((left["receipts"], left["deposits"][0]["record"]), ({}, None))
 
-    def test_ambiguous_roster_binding_requests_review(self):
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "competing.xlsx"
-            book = Workbook()
-            for sheet in [book.active, book.create_sheet("Other roster")]:
-                sheet.append(["ID", "Investor", "Amount Called"])
-                sheet.append(["001", "Taylor Reed", 100])
-            book.save(path)
-            book.close()
-            result = read_workbook(path)
-            self.assertNotIn("roster", result["bindings"])
-            self.assertTrue(any(q["code"] == "binding" for q in result["questions"]))
-
-    def test_preparation_applies_saved_rule_and_retains_currency_question(self):
-        with TemporaryDirectory() as directory:
-            folder = Path(directory)
-            path, bank = folder / "source.xlsx", folder / "statement.pdf"
-            workbook(path)
-            bank.write_bytes(b"mocked PDF test fixture")
-            for currency, status in [("USD", "success"), ("EUR", "needs_input")]:
-                events = Events(folder / currency)
-                with patch("ylookup.sources.read_statement", return_value=parse_statement([(1, statement(currency=currency))])):
-                    result = prepare_sources(path, bank, RULE, events)
-                self.assertEqual(result["status"], status)
-                evidence = json.loads((events.directory / "sources.json").read_text())
-                self.assertEqual(evidence["tracker"][0]["outstanding"], "5.00")
-                self.assertEqual(evidence["tracker"][1]["received"], "0.00")
-                if currency == "EUR":
-                    self.assertEqual(evidence["questions"][0]["code"], "currency_conflict")
-
-    def test_unmatched_duplicate_repeated_receipts_and_withdrawals_block_tracker(self):
-        with TemporaryDirectory() as directory:
-            folder = Path(directory)
-            path, bank = folder / "source.xlsx", folder / "statement.pdf"
-            workbook(path)
-            bank.write_bytes(b"mocked PDF test fixture")
-            unmatched = parse_statement([(1, statement(description="UNRELATED NAME"))])
-            duplicate = parse_statement([(1, statement()), (2, statement())])
-            repeated = parse_statement([(1, statement()), (2, statement(description="SECOND TAYLOR REE"))])
-            withdrawal = parse_statement([(1, statement(kind="withdrawal"))])
-            for index, evidence in enumerate([unmatched, duplicate, repeated, withdrawal]):
-                events = Events(folder / str(index))
-                with patch("ylookup.sources.read_statement", return_value=evidence):
-                    result = prepare_sources(path, bank, RULE, events)
-                self.assertEqual(result["status"], "needs_input")
-                self.assertEqual(result["tracker_records"], 0)
-
-    def test_conflicting_currency_inside_reference_is_not_ignored(self):
-        result = parse_statement([(1, statement().replace("   MORE WRAPPED REFERENCE", "   EUR|95.00|1.00"))])
-        self.assertTrue(any(q["code"] == "receipt_currency" for q in result["questions"]))
+    def test_withdrawals_duplicates_and_repeat_payers_are_questions(self):
+        table = self.table("Taylor Reed", "Morgan Vale")
+        cases = {"withdrawal": [(1, statement(kind="withdrawal"))],
+                 "duplicate_transaction": [(1, statement()), (2, statement())]}
+        for code, pages in cases.items():
+            self.assertEqual([q["code"] for q in match_receipts(parse_statement(pages), table, "Name", "full_or_unique_prefix", {})["questions"]], [code])
+        later = statement().replace("24 Feb 2026", "25 Feb 2026").replace("REF TAYLOR REE", "SECOND TAYLOR REE")
+        twice = match_receipts(parse_statement([(1, statement()), (2, later)]), table, "Name", "full_or_unique_prefix", {})
+        self.assertEqual(twice["questions"][0]["options"], ["2026-02-24", "2026-02-25"])
+        self.assertEqual(twice["receipts"][0]["amount"], Decimal("190.00"))
+        stop = {"withdrawal:2026-02-24 withdrawal 95.00": "Stop for review"}
+        with self.assertRaisesRegex(ValueError, "Stopped by a recorded answer"):
+            match_receipts(parse_statement([(1, statement(kind="withdrawal"))]), table, "Name", "full_or_unique_prefix", stop)
 
 
 if __name__ == "__main__":

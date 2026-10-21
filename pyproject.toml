@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ylookup-workflow-builder"
-version = "0.5.0"
-description = "Build, run and adapt a spreadsheet reconciliation workflow."
+version = "0.6.0"
+description = "Learn, run and adapt spreadsheet workflows from an input, a completed target and context."
 requires-python = ">=3.11"
 dependencies = ["openpyxl==3.1.5", "pypdf==6.10.0"]
 

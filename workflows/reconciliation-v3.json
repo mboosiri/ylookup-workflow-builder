@@ -1,0 +1,1437 @@
+{
+  "schema_version": 3,
+  "workflow_version": 1,
+  "plan": {
+    "intent": "Match bank statement deposits to investors in the Capital Call Tracker, log received amounts and outstanding balances, and generate a balanced journal entry file with proper accounting codes and references.",
+    "steps": [
+      {
+        "op": "match_receipts",
+        "intent": "Match each deposit in the bank statement to a record in the Capital Call Tracker using the Investor name, prioritizing full name matches but accepting unique surname prefixes when necessary.",
+        "table": "Capital Call Tracker",
+        "name": "Investor",
+        "policy": "full_or_unique_prefix"
+      },
+      {
+        "op": "fill_columns",
+        "intent": "Update the Capital Call Tracker with the date from the bank statement and the amount received for each matched deposit, then calculate the updated outstanding balance.",
+        "table": "Capital Call Tracker",
+        "columns": {
+          "Date as per bank statement": {
+            "var": "receipt.date"
+          },
+          "Amount Received": {
+            "var": "receipt.amount"
+          },
+          "Amount outstanding": {
+            "sub": [
+              {
+                "col": "Capital Call Tracker.Call #7 - Total Call"
+              },
+              {
+                "var": "receipt.amount"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "append_rows",
+        "intent": "Generate two journal entry lines for each matched deposit: one for cash received and one for the reduction in the investor's outstanding balance, using the correct GL account codes and ensuring the entries balance.",
+        "table": "DIU",
+        "for_each": "Capital Call Tracker",
+        "only_received": false,
+        "lines": 2,
+        "columns": {
+          "Legal Entity": {
+            "col": "Investors.Legal Entity"
+          },
+          "Legal Entity Domain": {
+            "col": "Investors.Legal Entity Domain"
+          },
+          "Deal": {
+            "col": "Investors.Deal"
+          },
+          "Position": {
+            "col": "Investors.Position"
+          },
+          "Batch Index": 1,
+          "Batch Type": {
+            "col": "Investors.Batch Type"
+          },
+          "JE Index": {
+            "var": "entry"
+          },
+          "Trans Index": {
+            "var": "line"
+          },
+          "GL Date": {
+            "var": "receipt.date"
+          },
+          "Effective Date": {
+            "var": "receipt.date"
+          },
+          "Transaction Currency": {
+            "unit": "Capital Call Tracker.Commitment"
+          },
+          "Allocation Rule": {
+            "line": [
+              "Non-Dominant",
+              "User Provided"
+            ]
+          },
+          "Transaction Type": {
+            "line": [
+              {
+                "concat": [
+                  "Cash - Received - ",
+                  {
+                    "unit": "Capital Call Tracker.Commitment"
+                  }
+                ]
+              },
+              "Due From Investors"
+            ]
+          },
+          "Account": {
+            "line": [
+              {
+                "lookup": {
+                  "table": "PCS Chart of Accounts (Global)",
+                  "where": "Trans Type",
+                  "equals": {
+                    "out": "Transaction Type"
+                  },
+                  "return": "GL Account Code"
+                }
+              },
+              {
+                "lookup": {
+                  "table": "PCS Chart of Accounts (Global)",
+                  "where": "Trans Type",
+                  "equals": {
+                    "out": "Transaction Type"
+                  },
+                  "return": "GL Account Code"
+                }
+              }
+            ]
+          },
+          "Is Debit": {
+            "line": [
+              "Yes",
+              "No"
+            ]
+          },
+          "Amount (Local)": {
+            "line": [
+              {
+                "var": "receipt.amount"
+              },
+              {
+                "var": "receipt.amount"
+              }
+            ]
+          },
+          "Amount (LE)": {
+            "line": [
+              {
+                "var": "receipt.amount"
+              },
+              {
+                "var": "receipt.amount"
+              }
+            ]
+          },
+          "Transaction Comments": {
+            "line": [
+              {
+                "concat": [
+                  "Capital Call Received from ",
+                  {
+                    "col": "Capital Call Tracker.Investor"
+                  }
+                ]
+              },
+              {
+                "concat": [
+                  "Capital Call Received from ",
+                  {
+                    "col": "Capital Call Tracker.Investor"
+                  }
+                ]
+              }
+            ]
+          },
+          "Batch Comments": {
+            "line": [
+              {
+                "concat": [
+                  "Capital Call Received from ",
+                  {
+                    "col": "Capital Call Tracker.Investor"
+                  }
+                ]
+              },
+              {
+                "concat": [
+                  "Capital Call Received from ",
+                  {
+                    "col": "Capital Call Tracker.Investor"
+                  }
+                ]
+              }
+            ]
+          },
+          "Bank Account": {
+            "line": [
+              {
+                "col": "Investors.Bank Account"
+              },
+              null
+            ]
+          },
+          "Investor": {
+            "line": [
+              null,
+              {
+                "col": "Capital Call Tracker.Investor"
+              }
+            ]
+          },
+          "Investor Domain": {
+            "line": [
+              null,
+              null
+            ]
+          },
+          "Vehicle": {
+            "line": [
+              null,
+              {
+                "col": "Investors.Legal Entity"
+              }
+            ]
+          },
+          "Investor Amount (LE)": {
+            "line": [
+              null,
+              {
+                "var": "receipt.amount"
+              }
+            ]
+          },
+          "Investor Amount (Local)": {
+            "line": [
+              null,
+              {
+                "var": "receipt.amount"
+              }
+            ]
+          },
+          "Transaction GL Reference": {
+            "line": [
+              {
+                "var": "row"
+              },
+              {
+                "var": "row"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "append_rows",
+        "intent": "Create a staging table to record the bank statement deposits with their matched investor, date, and amount, for audit and reconciliation purposes.",
+        "table": "Bank Statement Staging",
+        "for_each": "statement",
+        "only_received": false,
+        "lines": 1,
+        "columns": {
+          "Date": {
+            "var": "receipt.date"
+          },
+          "Line Item Description": {
+            "var": "receipt.description"
+          },
+          "Withdrawal": null,
+          "Deposit": {
+            "var": "receipt.amount"
+          },
+          "Matched Investor": {
+            "col": "Capital Call Tracker.Investor"
+          }
+        }
+      }
+    ]
+  },
+  "tables": {
+    "Capital Call Tracker": {
+      "sheet": "Capital Call Tracker",
+      "headers": [
+        "ID",
+        "Subscription",
+        "Investor",
+        "Commitment",
+        "% Ownership",
+        "Fee",
+        "Expenses",
+        "Investment",
+        "Call #7 - Total Call",
+        "Cumulative Capital Contributions (Prior)",
+        "Cumulative Capital Contributions (Current)",
+        "Unfunded Balance (Prior)",
+        "Unfunded Balance (Current)",
+        "Date as per bank statement",
+        "Amount Received",
+        "Amount outstanding"
+      ],
+      "columns": {
+        "Investor": {
+          "header": "Investor",
+          "types": [
+            "text"
+          ],
+          "position": "D"
+        },
+        "Commitment": {
+          "header": "Commitment",
+          "types": [
+            "number"
+          ],
+          "position": "E"
+        },
+        "Call #7 - Total Call": {
+          "header": "Call #7 - Total Call",
+          "types": [
+            "number"
+          ],
+          "position": "J"
+        },
+        "Date as per bank statement": {
+          "header": "Date as per bank statement",
+          "types": [
+            "blank"
+          ],
+          "position": "O"
+        },
+        "Amount Received": {
+          "header": "Amount Received",
+          "types": [
+            "blank"
+          ],
+          "position": "P"
+        },
+        "Amount outstanding": {
+          "header": "Amount outstanding",
+          "types": [
+            "blank"
+          ],
+          "position": "Q"
+        }
+      }
+    },
+    "Investors": {
+      "sheet": "Investors",
+      "headers": [
+        "Legal Entity",
+        "Legal Entity Domain",
+        "Deal",
+        "Position",
+        "Batch Type",
+        "Bank Account",
+        "Investor"
+      ],
+      "columns": {
+        "Legal Entity": {
+          "header": "Legal Entity",
+          "types": [
+            "text"
+          ],
+          "position": "A"
+        },
+        "Legal Entity Domain": {
+          "header": "Legal Entity Domain",
+          "types": [
+            "text"
+          ],
+          "position": "B"
+        },
+        "Deal": {
+          "header": "Deal",
+          "types": [
+            "text"
+          ],
+          "position": "C"
+        },
+        "Position": {
+          "header": "Position",
+          "types": [
+            "text"
+          ],
+          "position": "D"
+        },
+        "Batch Type": {
+          "header": "Batch Type",
+          "types": [
+            "text"
+          ],
+          "position": "E"
+        },
+        "Bank Account": {
+          "header": "Bank Account",
+          "types": [
+            "text"
+          ],
+          "position": "F"
+        }
+      }
+    },
+    "DIU": {
+      "sheet": "DIU",
+      "headers": [
+        "Legal Entity",
+        "Legal Entity Domain",
+        "Deal",
+        "Position",
+        "Batch Index",
+        "Batch Type",
+        "JE Index",
+        "Trans Index",
+        "GL Date",
+        "Effective Date",
+        "Transaction Currency",
+        "Allocation Rule",
+        "Transaction Type",
+        "Account",
+        "Is Debit",
+        "Amount (Local)",
+        "Amount (LE)",
+        "Transaction Comments",
+        "Batch Comments",
+        "Bank Account",
+        "Investor",
+        "Investor Domain",
+        "Vehicle",
+        "Investor Amount (LE)",
+        "Investor Amount (Local)",
+        "Transaction GL Reference"
+      ],
+      "columns": {
+        "Legal Entity": {
+          "header": "Legal Entity",
+          "types": [
+            "blank"
+          ],
+          "position": "A"
+        },
+        "Legal Entity Domain": {
+          "header": "Legal Entity Domain",
+          "types": [
+            "blank"
+          ],
+          "position": "B"
+        },
+        "Deal": {
+          "header": "Deal",
+          "types": [
+            "blank"
+          ],
+          "position": "C"
+        },
+        "Position": {
+          "header": "Position",
+          "types": [
+            "blank"
+          ],
+          "position": "D"
+        },
+        "Batch Index": {
+          "header": "Batch Index",
+          "types": [
+            "blank"
+          ],
+          "position": "E"
+        },
+        "Batch Type": {
+          "header": "Batch Type",
+          "types": [
+            "blank"
+          ],
+          "position": "F"
+        },
+        "JE Index": {
+          "header": "JE Index",
+          "types": [
+            "blank"
+          ],
+          "position": "G"
+        },
+        "Trans Index": {
+          "header": "Trans Index",
+          "types": [
+            "blank"
+          ],
+          "position": "H"
+        },
+        "GL Date": {
+          "header": "GL Date",
+          "types": [
+            "blank"
+          ],
+          "position": "I"
+        },
+        "Effective Date": {
+          "header": "Effective Date",
+          "types": [
+            "blank"
+          ],
+          "position": "J"
+        },
+        "Transaction Currency": {
+          "header": "Transaction Currency",
+          "types": [
+            "blank"
+          ],
+          "position": "K"
+        },
+        "Allocation Rule": {
+          "header": "Allocation Rule",
+          "types": [
+            "blank"
+          ],
+          "position": "L"
+        },
+        "Transaction Type": {
+          "header": "Transaction Type",
+          "types": [
+            "blank"
+          ],
+          "position": "M"
+        },
+        "Account": {
+          "header": "Account",
+          "types": [
+            "blank"
+          ],
+          "position": "N"
+        },
+        "Is Debit": {
+          "header": "Is Debit",
+          "types": [
+            "blank"
+          ],
+          "position": "O"
+        },
+        "Amount (Local)": {
+          "header": "Amount (Local)",
+          "types": [
+            "blank"
+          ],
+          "position": "P"
+        },
+        "Amount (LE)": {
+          "header": "Amount (LE)",
+          "types": [
+            "blank"
+          ],
+          "position": "Q"
+        },
+        "Transaction Comments": {
+          "header": "Transaction Comments",
+          "types": [
+            "blank"
+          ],
+          "position": "R"
+        },
+        "Batch Comments": {
+          "header": "Batch Comments",
+          "types": [
+            "blank"
+          ],
+          "position": "S"
+        },
+        "Bank Account": {
+          "header": "Bank Account",
+          "types": [
+            "blank"
+          ],
+          "position": "T"
+        },
+        "Investor": {
+          "header": "Investor",
+          "types": [
+            "blank"
+          ],
+          "position": "U"
+        },
+        "Investor Domain": {
+          "header": "Investor Domain",
+          "types": [
+            "blank"
+          ],
+          "position": "V"
+        },
+        "Vehicle": {
+          "header": "Vehicle",
+          "types": [
+            "blank"
+          ],
+          "position": "W"
+        },
+        "Investor Amount (LE)": {
+          "header": "Investor Amount (LE)",
+          "types": [
+            "blank"
+          ],
+          "position": "X"
+        },
+        "Investor Amount (Local)": {
+          "header": "Investor Amount (Local)",
+          "types": [
+            "blank"
+          ],
+          "position": "Y"
+        },
+        "Transaction GL Reference": {
+          "header": "Transaction GL Reference",
+          "types": [
+            "blank"
+          ],
+          "position": "Z"
+        }
+      }
+    },
+    "Bank Statement Staging": {
+      "sheet": "Bank Statement Staging",
+      "headers": [
+        "Date",
+        "Line Item Description",
+        "Withdrawal",
+        "Deposit",
+        "Matched Investor"
+      ],
+      "columns": {
+        "Date": {
+          "header": "Date",
+          "types": [
+            "blank"
+          ],
+          "position": "A"
+        },
+        "Line Item Description": {
+          "header": "Line Item Description",
+          "types": [
+            "blank"
+          ],
+          "position": "B"
+        },
+        "Withdrawal": {
+          "header": "Withdrawal",
+          "types": [
+            "blank"
+          ],
+          "position": "C"
+        },
+        "Deposit": {
+          "header": "Deposit",
+          "types": [
+            "blank"
+          ],
+          "position": "D"
+        },
+        "Matched Investor": {
+          "header": "Matched Investor",
+          "types": [
+            "blank"
+          ],
+          "position": "E"
+        }
+      }
+    },
+    "PCS Chart of Accounts (Global)": {
+      "sheet": "PCS Chart of Accounts (Global)",
+      "headers": [
+        "Account Type",
+        "GL Account Code",
+        "GL Account",
+        "Trans Type"
+      ],
+      "columns": {
+        "GL Account Code": {
+          "header": "GL Account Code",
+          "types": [
+            "text"
+          ],
+          "position": "B"
+        },
+        "Trans Type": {
+          "header": "Trans Type",
+          "types": [
+            "text"
+          ],
+          "position": "D"
+        }
+      }
+    }
+  },
+  "outputs": {
+    "Bank Statement Staging": {
+      "op": "append_rows",
+      "columns": [
+        "Date",
+        "Line Item Description",
+        "Withdrawal",
+        "Deposit",
+        "Matched Investor"
+      ]
+    },
+    "Capital Call Tracker": {
+      "op": "fill_columns",
+      "columns": [
+        "Date as per bank statement",
+        "Amount Received",
+        "Amount outstanding"
+      ]
+    },
+    "DIU": {
+      "op": "append_rows",
+      "columns": [
+        "Legal Entity",
+        "Legal Entity Domain",
+        "Deal",
+        "Position",
+        "Batch Index",
+        "Batch Type",
+        "JE Index",
+        "Trans Index",
+        "GL Date",
+        "Effective Date",
+        "Transaction Currency",
+        "Allocation Rule",
+        "Transaction Type",
+        "Account",
+        "Is Debit",
+        "Amount (Local)",
+        "Amount (LE)",
+        "Transaction Comments",
+        "Batch Comments",
+        "Bank Account",
+        "Investor",
+        "Investor Domain",
+        "Vehicle",
+        "Investor Amount (LE)",
+        "Investor Amount (Local)",
+        "Transaction GL Reference"
+      ]
+    }
+  },
+  "checks": [
+    {
+      "table": "Bank Statement Staging",
+      "kind": "required",
+      "column": "Date",
+      "line": 1
+    },
+    {
+      "table": "Bank Statement Staging",
+      "kind": "required",
+      "column": "Line Item Description",
+      "line": 1
+    },
+    {
+      "table": "Bank Statement Staging",
+      "kind": "blank",
+      "column": "Withdrawal",
+      "line": 1
+    },
+    {
+      "table": "Bank Statement Staging",
+      "kind": "required",
+      "column": "Deposit",
+      "line": 1
+    },
+    {
+      "table": "Bank Statement Staging",
+      "kind": "required",
+      "column": "Matched Investor",
+      "line": 1
+    },
+    {
+      "table": "Bank Statement Staging",
+      "kind": "total",
+      "column": "Deposit",
+      "line": 1
+    },
+    {
+      "table": "Capital Call Tracker",
+      "kind": "required",
+      "column": "Amount Received",
+      "line": 1
+    },
+    {
+      "table": "Capital Call Tracker",
+      "kind": "required",
+      "column": "Amount outstanding",
+      "line": 1
+    },
+    {
+      "table": "Capital Call Tracker",
+      "kind": "total",
+      "column": "Amount Received",
+      "line": 1
+    },
+    {
+      "table": "Capital Call Tracker",
+      "kind": "expression",
+      "column": "Amount outstanding",
+      "line": null,
+      "expression": {
+        "sub": [
+          {
+            "col": "Capital Call Tracker.Call #7 - Total Call"
+          },
+          {
+            "var": "receipt.amount"
+          }
+        ]
+      }
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Legal Entity",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Legal Entity",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Legal Entity",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Legal Entity",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "same_in_entry",
+      "column": "Legal Entity"
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Legal Entity Domain",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Legal Entity Domain",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Legal Entity Domain",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Legal Entity Domain",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "same_in_entry",
+      "column": "Legal Entity Domain"
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Deal",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Deal",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Deal",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Deal",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "same_in_entry",
+      "column": "Deal"
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Position",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Position",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Position",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Position",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "same_in_entry",
+      "column": "Position"
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Batch Index",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Batch Index",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Batch Index",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Batch Index",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "same_in_entry",
+      "column": "Batch Index"
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Batch Type",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Batch Type",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Batch Type",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Batch Type",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "same_in_entry",
+      "column": "Batch Type"
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "JE Index",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "JE Index",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "same_in_entry",
+      "column": "JE Index"
+    },
+    {
+      "table": "DIU",
+      "kind": "entry_counter",
+      "column": "JE Index"
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Trans Index",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Trans Index",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Trans Index",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Trans Index",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "line_counter",
+      "column": "Trans Index"
+    },
+    {
+      "table": "DIU",
+      "kind": "same_in_entry",
+      "column": "GL Date"
+    },
+    {
+      "table": "DIU",
+      "kind": "same_in_entry",
+      "column": "Effective Date"
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Transaction Currency",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Transaction Currency",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Transaction Currency",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Transaction Currency",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "same_in_entry",
+      "column": "Transaction Currency"
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Allocation Rule",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Allocation Rule",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Allocation Rule",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Allocation Rule",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Transaction Type",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Transaction Type",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Transaction Type",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Transaction Type",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Account",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Account",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Account",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Account",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Is Debit",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Is Debit",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Is Debit",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Is Debit",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Amount (Local)",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Amount (Local)",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "same_in_entry",
+      "column": "Amount (Local)"
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Amount (LE)",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Amount (LE)",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "same_in_entry",
+      "column": "Amount (LE)"
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Transaction Comments",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Transaction Comments",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "same_in_entry",
+      "column": "Transaction Comments"
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Batch Comments",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Batch Comments",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "same_in_entry",
+      "column": "Batch Comments"
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Bank Account",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Bank Account",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "blank",
+      "column": "Bank Account",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "blank",
+      "column": "Investor",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Investor",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "blank",
+      "column": "Investor Domain",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "blank",
+      "column": "Investor Domain",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "blank",
+      "column": "Vehicle",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Vehicle",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "uniform",
+      "column": "Vehicle",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "blank",
+      "column": "Investor Amount (LE)",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Investor Amount (LE)",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "blank",
+      "column": "Investor Amount (Local)",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Investor Amount (Local)",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Transaction GL Reference",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "required",
+      "column": "Transaction GL Reference",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "sequence",
+      "column": "Transaction GL Reference"
+    },
+    {
+      "table": "DIU",
+      "kind": "total",
+      "column": "Amount (Local)",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "total",
+      "column": "Amount (Local)",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "total",
+      "column": "Amount (LE)",
+      "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "total",
+      "column": "Amount (LE)",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "total",
+      "column": "Investor Amount (LE)",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "total",
+      "column": "Investor Amount (Local)",
+      "line": 2
+    },
+    {
+      "table": "DIU",
+      "kind": "constant",
+      "column": "Batch Index",
+      "line": null,
+      "value": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "constant",
+      "column": "Allocation Rule",
+      "line": 1,
+      "value": "Non-Dominant"
+    },
+    {
+      "table": "DIU",
+      "kind": "constant",
+      "column": "Allocation Rule",
+      "line": 2,
+      "value": "User Provided"
+    },
+    {
+      "table": "DIU",
+      "kind": "constant",
+      "column": "Transaction Type",
+      "line": 2,
+      "value": "Due From Investors"
+    },
+    {
+      "table": "DIU",
+      "kind": "expression",
+      "column": "Account",
+      "line": null,
+      "expression": {
+        "lookup": {
+          "table": "PCS Chart of Accounts (Global)",
+          "where": "Trans Type",
+          "equals": {
+            "out": "Transaction Type"
+          },
+          "return": "GL Account Code"
+        }
+      }
+    },
+    {
+      "table": "DIU",
+      "kind": "constant",
+      "column": "Is Debit",
+      "line": 1,
+      "value": "Yes"
+    },
+    {
+      "table": "DIU",
+      "kind": "constant",
+      "column": "Is Debit",
+      "line": 2,
+      "value": "No"
+    }
+  ],
+  "answers": [
+    {
+      "id": "currency_conflict:EUR vs USD",
+      "question": "The bank statement is in EUR but Capital Call Tracker states its amounts in USD. How should the amounts be posted?",
+      "answer": "Post the amounts as they are, without FX conversion",
+      "by": "person"
+    }
+  ],
+  "built_from": {
+    "input": "import-capital-call-notice-diu-input.xlsx",
+    "target": "import-capital-call-notice-diu-output.xlsx",
+    "prompt_version": "workflow-plan-v20"
+  }
+}

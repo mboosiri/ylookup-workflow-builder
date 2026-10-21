@@ -2,31 +2,31 @@
 
 ✅ done · 🔨 next · ⏳ later.
 
-## Done
+## Review round 1
 
-| ID | Task | Evidence |
-|---|---|---|
-| ✅ B01 | Workbook inspection, package, CLI | `ylookup inspect` |
-| ✅ S01 | Find tables by header meaning; parse the bank PDF; match payers | 10 investors, 2 receipts matched |
-| ✅ W01 | Build loop: model plan → execute → compare → refine → save | 88 → 10 → 0 differences over three calls |
-| ✅ W02 | Currency question (EUR vs USD); accepted answer saved in the workflow | `examples/exercise-answers.json` |
-| ✅ R01 | `ylookup run`: saved workflow, no target or model | 20 rows, 0 differences from the target |
-| ✅ R02 | Required DIU fields learned from the target and enforced at run time | Blank Deal / Domain now stop instead of passing |
-| ✅ R03 | Report tab and column moves since build (`binding_changes`) | Renamed tabs: success, moves listed |
-| ✅ U01 | Streamlit UI: Build / Run / Adapt / Run history | `ylookup ui` |
-| ✅ D01 | README, design doc, sequence diagrams | [README](../README.md), [design](design.md) |
-| ✅ C01 | Removed the legacy numeric experiment commands | 30 tests pass |
-| ✅ R05 | Build reliability: retries with backoff, provider fallback, 5 calls, compact per-field feedback, field locking, type-preserving diffs | [design](design.md#known-limitations) |
-| ✅ R06 | Measure: live rounds of 5 builds | 13 of 20 live builds since R05; 4 of 5 on the current prompt (v13) |
-| ✅ A01 | `ylookup adapt`: model maps missing columns; code verifies and saves workflow v+1 | `combined.xlsx` → v2 |
-| ✅ A02 | Stress variants and adapt tests | `scripts/stress_variants.py`, `tests/test_adapt.py` |
+| ID | Feedback | What changed | Evidence |
+|---|---|---|---|
+| ✅ V01 | Make the builder learn, not the code | Output tables, headers, filled columns, iterations, column meanings and checks are learned from input vs target. Steps are composed by the model from a tool catalogue. The DIU headers, alias lists, field vocabulary, three fixed steps and hand-written journal rules are gone. | `learn`, `survey`, `learn_checks`; tests use a different output template |
+| ✅ V02 | Remove the answer hints | The system prompt describes only the tools and the evidence format. The context file is the brief's customer quote, word for word. | 10 of 10 live builds on the final prompt ([design](design.md#known-limitations)) |
+| ✅ V03 | Adapt: renamed Bank Account / Legal Entity / Batch Type rejected | Each source column has one key, so mappings are one-to-one by construction. | `constants-renamed` → v2 (live) |
+| ✅ V04 | Adapt: renamed chart headers pick the wrong table | Tables bind by their whole header fingerprint (or sheet name), best match first. | `chart-renamed`, `chart-tab-renamed` → v2 (live) |
+| ✅ V05 | A wrong column mapping can hang the run | Cause: random-access reads in read-only mode past a missing `=SUM(` row, O(n²) over 16,406 rows. Sheets are now read in one pass, which stops after 50 blank rows, and rows are never deleted. | `test_a_wrong_column_mapping_fails_fast` |
+| ✅ V06 | Harder adapt variants | 9 new variants: renamed constants, renamed chart (and its tab), reshuffled tracker, distractor column, duplicate name, unknown payer, extra investor | `scripts/stress_variants.py`, README table |
+| ✅ V07 | General, interactive questions | Every question has a stable id and options when code can act. The terminal and UI prompt, `--answers` replays, and policy answers are recorded in `workflow.json`. | Interactive build and adapt via a pty; `test_a_model_question_is_asked_and_the_answer_is_used_and_recorded` |
+
+## Done earlier
+
+| ID | Task |
+|---|---|
+| ✅ B01 | Workbook inspection, package, CLI |
+| ✅ W01 | Build loop: model plan → execute → compare → refine → save |
+| ✅ R01 | `ylookup run`: saved workflow, no target or model |
+| ✅ R03 | Report tab and column moves since build |
+| ✅ U01 | Streamlit UI: Build / Run / Adapt / Run history |
+| ✅ A01 | `ylookup adapt`: model maps missing columns; code verifies and saves workflow v+1 |
 
 ## Later
 
-- [ ] ⏳ **A03** Inputs without cached formula results (recalculate, or ask).
-- [ ] ⏳ **A04** General answer types beyond currency and column mapping; prompt on the CLI.
-
-## Submission
-
-- [x] ✅ **Q01** Clean-clone run of all three phases from the README: all results as documented.
-- [x] ✅ **Q02** Credential and private-file scan of all history: clean.
+- [ ] ⏳ **A03** Inputs without cached formula results (recalculate instead of asking for each value).
+- [ ] ⏳ **M01** Benchmark of several workflows and variants, scored per prompt or code change.
+- [ ] ⏳ **M02** Several completed examples per build, to separate rules from coincidences in learned checks.

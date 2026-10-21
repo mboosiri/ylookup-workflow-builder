@@ -13,8 +13,7 @@ from .events import redact
 
 MODEL = "qwen/qwen3-30b-a3b-instruct-2507"
 VERIFIED_PROVIDERS = {MODEL: "nebius", "mistralai/mistral-small-3.2-24b-instruct": "venice"}
-PROMPT_VERSION = "numeric-transform-v1"
-TIMEOUT = 90
+TIMEOUT = 180
 RETRYABLE = {408, 429, 500, 502, 503, 504}
 RETRIES = 2  # small fixed retry count for transient limits; an outage still stops the build.
 
@@ -45,11 +44,11 @@ def settings():
 
 
 class OpenRouter:
-    def __init__(self, key, model=MODEL, prompt_version=PROMPT_VERSION, max_tokens=1200, schema=None):
+    def __init__(self, key, model=MODEL, prompt_version="", max_tokens=1200, schema=None):
         if model not in VERIFIED_PROVIDERS:
             raise ValueError("Unverified model for this increment.")
-        if type(max_tokens) is not int or not 1 <= max_tokens <= 4000:
-            raise ValueError("Output token budget must be between one and 4000.")
+        if type(max_tokens) is not int or not 1 <= max_tokens <= 8000:
+            raise ValueError("Output token budget must be between one and 8000.")
         self.key, self.model = key, model
         self.prompt_version, self.max_tokens = prompt_version, max_tokens
         self.schema = schema
@@ -61,7 +60,7 @@ class OpenRouter:
                 "provider": {"order": [VERIFIED_PROVIDERS[self.model]], "require_parameters": True, "allow_fallbacks": True}}
         if self.schema is not None:
             body["response_format"] = {"type": "json_schema", "json_schema": {
-                "name": "reconciliation_proposal", "strict": True, "schema": self.schema}}
+                "name": "workflow_proposal", "strict": True, "schema": self.schema}}
         encoded = json.dumps(body)
         if self.key in encoded or "sk-or-v1-" in encoded:
             raise ValueError("Credentials found in model context; request refused.")
