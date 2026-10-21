@@ -1,0 +1,21 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+outputs/
+runs/
+~$*
+
+# Local source materials.
+*.pdf
+import-capital-call-notice-diu-input.xlsx
+import-capital-call-notice-diu-output.xlsx
+
+# Prepared case evidence stays local, alongside supplied data.
+/data/

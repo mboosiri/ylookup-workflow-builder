@@ -1,0 +1,9 @@
+The customer imports the bank statement, identifies each payment using full names
+where possible and partial names where necessary, and leaves uncertain matches
+for review. They record what each investor paid against what was called. Finally,
+they build the accounting upload: two balancing lines, cash received and investor
+receivable reduced, correct account codes from the chart, linked entries and totals
+that reconcile. The cash debit increases cash by the actual payment; the matching
+receivable credit has the same amount. Zero receipts apply to non-payers, not to
+the cash side of a paid investor. Infer the demonstrated output conventions from the completed file;
+ask when essential business information is ambiguous.
