@@ -2,25 +2,50 @@
   "schema_version": 3,
   "workflow_version": 1,
   "plan": {
-    "intent": "Match bank statement deposits to investors in the Capital Call Tracker, log received amounts and outstanding balances, and generate a balanced journal entry file with proper accounting codes and references.",
+    "intent": "Process bank statement payments by matching them to investors in the Capital Call Tracker, log received amounts, and generate balanced accounting entries for upload.",
     "steps": [
       {
-        "op": "match_receipts",
-        "intent": "Match each deposit in the bank statement to a record in the Capital Call Tracker using the Investor name, prioritizing full name matches but accepting unique surname prefixes when necessary.",
-        "table": "Capital Call Tracker",
+        "op": "link_rows",
+        "intent": "Match each bank statement entry to the correct investor using full name or unique name prefix.",
+        "table": "BS-Test-4",
+        "text": "Description",
+        "to": "Capital Call Tracker",
         "name": "Investor",
         "policy": "full_or_unique_prefix"
       },
       {
+        "op": "append_rows",
+        "intent": "Create a staging table with bank statement details, including matched investor names.",
+        "table": "Bank Statement Staging",
+        "for_each": "BS-Test-4",
+        "only_linked": false,
+        "lines": 1,
+        "columns": {
+          "Date": {
+            "col": "BS-Test-4.Date"
+          },
+          "Line Item Description": {
+            "col": "BS-Test-4.Description"
+          },
+          "Withdrawal": null,
+          "Deposit": {
+            "col": "BS-Test-4.Deposit"
+          },
+          "Matched Investor": {
+            "col": "Capital Call Tracker.Investor"
+          }
+        }
+      },
+      {
         "op": "fill_columns",
-        "intent": "Update the Capital Call Tracker with the date from the bank statement and the amount received for each matched deposit, then calculate the updated outstanding balance.",
+        "intent": "Update the Capital Call Tracker with the date from the bank statement and the amount received, then calculate the remaining outstanding balance.",
         "table": "Capital Call Tracker",
         "columns": {
           "Date as per bank statement": {
-            "var": "receipt.date"
+            "first": "BS-Test-4.Date"
           },
           "Amount Received": {
-            "var": "receipt.amount"
+            "sum": "BS-Test-4.Deposit"
           },
           "Amount outstanding": {
             "sub": [
@@ -28,7 +53,7 @@
                 "col": "Capital Call Tracker.Call #7 - Total Call"
               },
               {
-                "var": "receipt.amount"
+                "sum": "BS-Test-4.Deposit"
               }
             ]
           }
@@ -36,10 +61,10 @@
       },
       {
         "op": "append_rows",
-        "intent": "Generate two journal entry lines for each matched deposit: one for cash received and one for the reduction in the investor's outstanding balance, using the correct GL account codes and ensuring the entries balance.",
+        "intent": "Generate two accounting lines per investor: one for cash received and one for the investor's liability reduction, using correct GL codes and amounts.",
         "table": "DIU",
         "for_each": "Capital Call Tracker",
-        "only_received": false,
+        "only_linked": false,
         "lines": 2,
         "columns": {
           "Legal Entity": {
@@ -65,10 +90,10 @@
             "var": "line"
           },
           "GL Date": {
-            "var": "receipt.date"
+            "first": "BS-Test-4.Date"
           },
           "Effective Date": {
-            "var": "receipt.date"
+            "first": "BS-Test-4.Date"
           },
           "Transaction Currency": {
             "unit": "Capital Call Tracker.Commitment"
@@ -93,28 +118,14 @@
             ]
           },
           "Account": {
-            "line": [
-              {
-                "lookup": {
-                  "table": "PCS Chart of Accounts (Global)",
-                  "where": "Trans Type",
-                  "equals": {
-                    "out": "Transaction Type"
-                  },
-                  "return": "GL Account Code"
-                }
+            "lookup": {
+              "table": "PCS Chart of Accounts (Global)",
+              "where": "Trans Type",
+              "equals": {
+                "out": "Transaction Type"
               },
-              {
-                "lookup": {
-                  "table": "PCS Chart of Accounts (Global)",
-                  "where": "Trans Type",
-                  "equals": {
-                    "out": "Transaction Type"
-                  },
-                  "return": "GL Account Code"
-                }
-              }
-            ]
+              "return": "GL Account Code"
+            }
           },
           "Is Debit": {
             "line": [
@@ -123,62 +134,24 @@
             ]
           },
           "Amount (Local)": {
-            "line": [
-              {
-                "var": "receipt.amount"
-              },
-              {
-                "var": "receipt.amount"
-              }
-            ]
+            "sum": "BS-Test-4.Deposit"
           },
           "Amount (LE)": {
-            "line": [
-              {
-                "var": "receipt.amount"
-              },
-              {
-                "var": "receipt.amount"
-              }
-            ]
+            "sum": "BS-Test-4.Deposit"
           },
           "Transaction Comments": {
-            "line": [
+            "concat": [
+              "Capital Call Received from ",
               {
-                "concat": [
-                  "Capital Call Received from ",
-                  {
-                    "col": "Capital Call Tracker.Investor"
-                  }
-                ]
-              },
-              {
-                "concat": [
-                  "Capital Call Received from ",
-                  {
-                    "col": "Capital Call Tracker.Investor"
-                  }
-                ]
+                "col": "Capital Call Tracker.Investor"
               }
             ]
           },
           "Batch Comments": {
-            "line": [
+            "concat": [
+              "Capital Call Received from ",
               {
-                "concat": [
-                  "Capital Call Received from ",
-                  {
-                    "col": "Capital Call Tracker.Investor"
-                  }
-                ]
-              },
-              {
-                "concat": [
-                  "Capital Call Received from ",
-                  {
-                    "col": "Capital Call Tracker.Investor"
-                  }
-                ]
+                "col": "Capital Call Tracker.Investor"
               }
             ]
           },
@@ -198,12 +171,7 @@
               }
             ]
           },
-          "Investor Domain": {
-            "line": [
-              null,
-              null
-            ]
-          },
+          "Investor Domain": null,
           "Vehicle": {
             "line": [
               null,
@@ -216,7 +184,7 @@
             "line": [
               null,
               {
-                "var": "receipt.amount"
+                "sum": "BS-Test-4.Deposit"
               }
             ]
           },
@@ -224,42 +192,12 @@
             "line": [
               null,
               {
-                "var": "receipt.amount"
+                "sum": "BS-Test-4.Deposit"
               }
             ]
           },
           "Transaction GL Reference": {
-            "line": [
-              {
-                "var": "row"
-              },
-              {
-                "var": "row"
-              }
-            ]
-          }
-        }
-      },
-      {
-        "op": "append_rows",
-        "intent": "Create a staging table to record the bank statement deposits with their matched investor, date, and amount, for audit and reconciliation purposes.",
-        "table": "Bank Statement Staging",
-        "for_each": "statement",
-        "only_received": false,
-        "lines": 1,
-        "columns": {
-          "Date": {
-            "var": "receipt.date"
-          },
-          "Line Item Description": {
-            "var": "receipt.description"
-          },
-          "Withdrawal": null,
-          "Deposit": {
-            "var": "receipt.amount"
-          },
-          "Matched Investor": {
-            "col": "Capital Call Tracker.Investor"
+            "var": "row"
           }
         }
       }
@@ -384,6 +322,86 @@
             "text"
           ],
           "position": "F"
+        }
+      }
+    },
+    "BS-Test-4": {
+      "sheet": "BS-Test-4",
+      "headers": [
+        "Date",
+        "Description",
+        "Withdrawal",
+        "Deposit",
+        "Balance"
+      ],
+      "columns": {
+        "Date": {
+          "header": "Date",
+          "types": [
+            "date"
+          ],
+          "position": "A"
+        },
+        "Description": {
+          "header": "Description",
+          "types": [
+            "text"
+          ],
+          "position": "B"
+        },
+        "Deposit": {
+          "header": "Deposit",
+          "types": [
+            "number"
+          ],
+          "position": "D"
+        }
+      }
+    },
+    "Bank Statement Staging": {
+      "sheet": "Bank Statement Staging",
+      "headers": [
+        "Date",
+        "Line Item Description",
+        "Withdrawal",
+        "Deposit",
+        "Matched Investor"
+      ],
+      "columns": {
+        "Date": {
+          "header": "Date",
+          "types": [
+            "blank"
+          ],
+          "position": "A"
+        },
+        "Line Item Description": {
+          "header": "Line Item Description",
+          "types": [
+            "blank"
+          ],
+          "position": "B"
+        },
+        "Withdrawal": {
+          "header": "Withdrawal",
+          "types": [
+            "blank"
+          ],
+          "position": "C"
+        },
+        "Deposit": {
+          "header": "Deposit",
+          "types": [
+            "blank"
+          ],
+          "position": "D"
+        },
+        "Matched Investor": {
+          "header": "Matched Investor",
+          "types": [
+            "blank"
+          ],
+          "position": "E"
         }
       }
     },
@@ -602,53 +620,6 @@
         }
       }
     },
-    "Bank Statement Staging": {
-      "sheet": "Bank Statement Staging",
-      "headers": [
-        "Date",
-        "Line Item Description",
-        "Withdrawal",
-        "Deposit",
-        "Matched Investor"
-      ],
-      "columns": {
-        "Date": {
-          "header": "Date",
-          "types": [
-            "blank"
-          ],
-          "position": "A"
-        },
-        "Line Item Description": {
-          "header": "Line Item Description",
-          "types": [
-            "blank"
-          ],
-          "position": "B"
-        },
-        "Withdrawal": {
-          "header": "Withdrawal",
-          "types": [
-            "blank"
-          ],
-          "position": "C"
-        },
-        "Deposit": {
-          "header": "Deposit",
-          "types": [
-            "blank"
-          ],
-          "position": "D"
-        },
-        "Matched Investor": {
-          "header": "Matched Investor",
-          "types": [
-            "blank"
-          ],
-          "position": "E"
-        }
-      }
-    },
     "PCS Chart of Accounts (Global)": {
       "sheet": "PCS Chart of Accounts (Global)",
       "headers": [
@@ -761,7 +732,8 @@
       "table": "Bank Statement Staging",
       "kind": "total",
       "column": "Deposit",
-      "line": 1
+      "line": 1,
+      "of": "BS-Test-4.Deposit"
     },
     {
       "table": "Capital Call Tracker",
@@ -779,7 +751,8 @@
       "table": "Capital Call Tracker",
       "kind": "total",
       "column": "Amount Received",
-      "line": 1
+      "line": 1,
+      "of": "BS-Test-4.Deposit"
     },
     {
       "table": "Capital Call Tracker",
@@ -792,7 +765,7 @@
             "col": "Capital Call Tracker.Call #7 - Total Call"
           },
           {
-            "var": "receipt.amount"
+            "sum": "BS-Test-4.Deposit"
           }
         ]
       }
@@ -1330,37 +1303,43 @@
       "table": "DIU",
       "kind": "total",
       "column": "Amount (Local)",
-      "line": 1
+      "line": 1,
+      "of": "BS-Test-4.Deposit"
     },
     {
       "table": "DIU",
       "kind": "total",
       "column": "Amount (Local)",
-      "line": 2
+      "line": 2,
+      "of": "BS-Test-4.Deposit"
     },
     {
       "table": "DIU",
       "kind": "total",
       "column": "Amount (LE)",
-      "line": 1
+      "line": 1,
+      "of": "BS-Test-4.Deposit"
     },
     {
       "table": "DIU",
       "kind": "total",
       "column": "Amount (LE)",
-      "line": 2
+      "line": 2,
+      "of": "BS-Test-4.Deposit"
     },
     {
       "table": "DIU",
       "kind": "total",
       "column": "Investor Amount (LE)",
-      "line": 2
+      "line": 2,
+      "of": "BS-Test-4.Deposit"
     },
     {
       "table": "DIU",
       "kind": "total",
       "column": "Investor Amount (Local)",
-      "line": 2
+      "line": 2,
+      "of": "BS-Test-4.Deposit"
     },
     {
       "table": "DIU",
@@ -1424,7 +1403,7 @@
   "answers": [
     {
       "id": "currency_conflict:EUR vs USD",
-      "question": "The bank statement is in EUR but Capital Call Tracker states its amounts in USD. How should the amounts be posted?",
+      "question": "BS-Test-4 is in EUR but Capital Call Tracker states its amounts in USD. How should the amounts be posted?",
       "answer": "Post the amounts as they are, without FX conversion",
       "by": "person"
     }
@@ -1432,6 +1411,9 @@
   "built_from": {
     "input": "import-capital-call-notice-diu-input.xlsx",
     "target": "import-capital-call-notice-diu-output.xlsx",
-    "prompt_version": "workflow-plan-v20"
+    "sources": [
+      "BS-Test-4.pdf"
+    ],
+    "prompt_version": "workflow-plan-v21"
   }
 }

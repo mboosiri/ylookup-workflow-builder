@@ -16,30 +16,31 @@ import re
 
 from openpyxl.utils import get_column_letter
 
-from .planner import (ARITHMETIC, MAX_LINES, POLICIES, VARS, check_outputs, contexts, currency_questions, entries,
-                      environment, evaluate, execute_plan, keyed, learn_checks, receipts_total, references,
-                      statement_with_answers, total_checks)
-from .sources import (answered, bind_tables, canon, column_types, equivalent, find_tables, kind, match_names,
-                      match_receipts, normalise, number, question, sheet_rows)
+from .planner import (AGGREGATES, ARITHMETIC, MAX_LINES, POLICIES, VARS, check_outputs, contexts, entries, environment,
+                      evaluate, execute_plan, keyed, learn_checks, link_totals, normalise_plan, references, run_link,
+                      total_checks, unit_questions)
+from .sources import (answered, bind_tables, canon, column_types, equivalent, find_tables, kind, match_names, normalise,
+                      number, question, read_sources, sheet_rows)
 from .workbook import compare_outputs, plain, read_outputs, write_outputs
 
 
-PROMPT_VERSION = "workflow-plan-v20"
+PROMPT_VERSION = "workflow-plan-v21"
 MAX_ATTEMPTS = 5
 # ponytail: tables with up to 50 records are treated as private (people, entities); larger ones as
 # reference lists. Replace with an explicit privacy setting if a real roster is bigger.
 SMALL = 50
 SYSTEM = """You design a reusable spreadsheet workflow. The user message holds evidence that code
-gathered from an input workbook, a bank statement and a completed example of the same job:
+gathered from an input workbook, any other source files (workbooks, PDF tables) and a completed
+example of the same job:
 - customer_context: how the customer describes the job, in their words.
-- input_tables: the tables found in the input, with the value types of each column.
+- input_tables: every table found in the input and the source files, with the value types of each column.
 - outputs: what the completed example adds: rows appended under an empty header (append_rows) or
   values written into existing records (fill_columns). For appended tables, fits lists the
   iterations whose row count matches the example. For each output column, code lists candidate
   expressions it verified against the example, either for "all lines"/"all rows" or for one line
   of each entry ("line 1", "line 2", ...). Where none was found it shows examples instead.
-- name_matching: how many deposits each name column identifies, by full name or by first name
-  plus a unique surname prefix.
+- links: text columns whose values name the records of another table, with how many rows each
+  links by full name or by first name plus a unique surname prefix.
 - recorded_answers: decisions a person has made. Follow them.
 
 Reply with JSON, either {"status":"ready","workflow":PLAN,"question":null,"options":null} or
@@ -48,19 +49,20 @@ essential is ambiguous and neither the evidence nor the customer's description s
 
 PLAN = {"intent": text, "steps": [STEP, ...]}. Each step is one tool call with its own intent.
 Intents say what the job does for the business, never how an earlier attempt was fixed.
-- match_receipts {table, name, policy}: matches each statement deposit to one record of table by
-  its name column. policy is full_name_only or full_or_unique_prefix.
+- link_rows {table, text, to, name, policy}: links each row of table to the one record of `to`
+  whose `name` appears in its `text` column. policy is full_name_only or full_or_unique_prefix.
 - fill_columns {table, columns}: one value per record of table for each column.
-- append_rows {table, for_each, only_received, lines, columns}: appends rows under an empty header.
-  for_each is a table (one entry per record) or "statement" (one entry per matched deposit);
-  only_received keeps only entries with a receipt; lines is the number of rows per entry.
+- append_rows {table, for_each, only_linked, lines, columns}: appends rows under an empty header,
+  one entry per record of for_each; only_linked keeps records that have a link; lines is the number
+  of rows per entry.
 Produce every output exactly once and order the steps so each comes after what it uses.
 
 An expression is null, a literal, or one JSON object:
-{"col":"Table.Column"}  the current record's value, or the value of a one-row table
-{"var":NAME}  receipt.amount (0 without a receipt), receipt.date, receipt.description,
-              entry, line, row (1-based counters in the output table), statement.currency
-{"unit":"Table.Column"}  the unit label printed above that column
+{"col":"Table.Column"}  the value in the current record, in the record it is linked to, or in a one-row table
+{"sum":"Table.Column"}  the total over the rows linked to the current record (0 when none)
+{"first":"Table.Column"}  the value from the rows linked to the current record (null when none)
+{"var":"entry"|"line"|"row"}  1-based counters in the output table
+{"unit":"Table.Column"}  the unit label of that column (e.g. a currency)
 {"out":"Column"}  another column of the same output row
 {"line":[e1,e2,...]}  one expression per line of an entry, in order; outermost only
 {"concat":[e,...]}  joins text; no part may be null
@@ -68,10 +70,11 @@ An expression is null, a literal, or one JSON object:
 {"lookup":{"table":T,"where":"Column","equals":e,"return":"Column"}}  the row of T whose Column equals e
 Each candidate list holds alternatives: pick ONE expression from it. Where a list is given for all
 lines, use that one expression without line; where lists are given per line, combine one pick per
-line with line. Never put a whole candidate list inside line. Prefer an expression that reads the input over a literal copied from the
-example, so the workflow still works when the values change. Use the customer's description to
-choose between candidates and fits. V_ and DATE_ tokens stand for anonymised input values; never
-write them as literals. Code runs your plan, compares it with the example and sends back what differs."""
+line with line. Never put a whole candidate list inside line. Prefer an expression that reads the
+input over a literal copied from the example, so the workflow still works when the values change.
+Use the customer's description to choose between candidates and fits. V_ and DATE_ tokens stand for
+anonymised input values; never write them as literals. Code runs your plan, compares it with the
+example and sends back what differs."""
 
 
 def walk(node):
@@ -114,8 +117,8 @@ def learn_outputs(spec, bound, targets):
         elif table["records"]:
             by_key = {canon(r["key"]) or r["row"]: r["values"] for r in other["records"]}
             pairs = [(canon(r["key"]) or r["row"], r) for r in table["records"]]
-            changed = [name for name in spec["tables"][key]["columns"]
-                       if any(k in by_key and not equivalent(r["values"][name], by_key[k][name]) for k, r in pairs)]
+            changed = [name for name in spec["tables"][key]["columns"] if name in other["columns"]
+                       and any(k in by_key and not equivalent(r["values"][name], by_key[k][name]) for k, r in pairs)]
             if changed:
                 outputs[key] = {"op": "fill_columns", "columns": changed}
                 target[key] = {k: {name: by_key.get(k, {}).get(name) for name in changed} for k, _ in pairs}
@@ -124,31 +127,40 @@ def learn_outputs(spec, bound, targets):
     return outputs, target, helpers
 
 
-def name_evidence(env):
-    deposits = [t for t in env["statement"]["transactions"] if t["kind"] == "deposit"]
+def link_evidence(env):
+    """Which text column of one table names the records of another: rows each pair links uniquely."""
+    appended = {k for k, o in env["spec"]["outputs"].items() if o["op"] == "append_rows"}
     found = []
-    for key, table in env["tables"].items():
-        if len(table["records"]) < 2:
+    for to, target in env["tables"].items():
+        if len(target["records"]) < 2 or to in appended:
             continue
-        for name in table["columns"]:
-            names = {i: r["values"][name] for i, r in enumerate(table["records"])
+        for name in target["columns"]:
+            names = {i: r["values"][name] for i, r in enumerate(target["records"])
                      if isinstance(r["values"][name], str) and normalise(r["values"][name])}
-            if len(names) < 2:
+            if len(names) < 2 or 2 * len(set(names.values())) < len(names):
                 continue
-            full = sum(len(match_names(d["description"], names, "full_name_only")[0]) == 1 for d in deposits)
-            either = sum(len(match_names(d["description"], names)[0]) == 1 for d in deposits)
-            if either:
-                found.append({"table": key, "column": name, "deposits": len(deposits),
-                              "matched_full_name_only": full, "matched_full_or_unique_prefix": either})
-    return sorted(found, key=lambda e: (-e["matched_full_or_unique_prefix"], -e["matched_full_name_only"]))[:3]
+            for key, source in env["tables"].items():
+                if key in (to, *appended) or not 1 <= len(source["records"]) <= 200:
+                    continue
+                for text_ in source["columns"]:
+                    values = [r["values"].get(text_) for r in source["records"]]
+                    if not any(isinstance(v, str) and len(v) > 3 for v in values):
+                        continue
+                    either = sum(isinstance(v, str) and len(match_names(v, names)[0]) == 1 for v in values)
+                    if 2 * either >= len(values):  # most rows must name a record; a stray mention is not a link
+                        full = sum(isinstance(v, str) and len(match_names(v, names, "full_name_only")[0]) == 1 for v in values)
+                        found.append({"table": key, "text": text_, "to": to, "name": name, "rows": len(values),
+                                      "linked_full_name_only": full, "linked_full_or_unique_prefix": either})
+    found.sort(key=lambda e: (-e["linked_full_or_unique_prefix"] / e["rows"], -e["linked_full_or_unique_prefix"]))
+    # The strongest link, plus others only when they link several rows: one stray mention is not evidence.
+    return found[:1] + [e for e in found[1:3] if e["linked_full_or_unique_prefix"] >= 2]
 
 
 def fits(env, rows):
     """Iterations whose entry count divides the target's row count into 1-9 lines per entry."""
     options = [(key, False) for key, t in env["tables"].items()
                if t["records"] and env["spec"]["outputs"].get(key, {}).get("op") != "append_rows"]
-    if env.get("match"):
-        options += [(env["match"], True), ("statement", False)]
+    options += [(key, True) for key in list(env["links"]) + list(env["linked"])]
     result = []
     for for_each, only in options:
         count = len(entries(env, for_each, only))
@@ -169,13 +181,18 @@ def probe(expression, ctxs):
 
 def simple_refs(env, iterated):
     found, units = [], set()
+    linked_to = env["links"].get(iterated, {}).get("to")
+    linked_from = env["linked"].get(iterated, {}).get("from")
     for ref, (key, name) in env["refs"].items():
         out = env["spec"]["outputs"].get(key, {})
         if out.get("op") == "append_rows" or name in out.get("columns", []):
             continue
         table = env["tables"][key]
-        if key == iterated or len(table["records"]) == 1:
+        if key in (iterated, linked_to) or len(table["records"]) == 1:
             found.append({"col": ref})
+        if key == linked_from:
+            types = env["spec"]["tables"][key]["columns"][name]["types"]
+            found += [{"first": ref}] + ([{"sum": ref}] if "number" in types else [])
         if table["units"].get(name) and key not in units:
             units.add(key)
             found.append({"unit": ref})
@@ -348,8 +365,6 @@ def masker(env, sources):
                     text = canon(value) if kind(value) == "text" else None
                     if text and len(text) >= 3 and text not in public and not re.fullmatch(r"[A-Z]{3}", text):
                         tokens.setdefault(text, f"V_{len(tokens) + 1}")
-    for transaction in env["statement"]["transactions"]:  # bank references carry names and account numbers
-        tokens.setdefault(canon(transaction["description"]), f"V_{len(tokens) + 1}")
     dates = {}
     ordered = sorted((t for t in tokens if len(t) >= 6), key=len, reverse=True)
 
@@ -402,11 +417,11 @@ def survey(env, outputs, expected, helpers, private, mask):
         view[key] = {"op": out["op"], "target_rows": len(rows),
                      "columns_explained": f"{score} of {len(out['columns'])}", "columns": columns}
         if out["op"] == "append_rows":
-            view[key]["fits"] = [{"for_each": s[0], "only_received": s[1], "lines": s[2]} for _, s, *_ in best]
+            view[key]["fits"] = [{"for_each": s[0], "only_linked": s[1], "lines": s[2]} for _, s, *_ in best]
         if helpers.get(key):
             view[key]["target_helper_columns_not_reproduced"] = helpers[key]
         checks += learn_checks(key, out["columns"], rows, shape[2])
-        checks += total_checks(key, out["columns"], rows, shape[2], receipts_total(env))
+        checks += total_checks(key, out["columns"], rows, shape[2], link_totals(env))
         for column, groups in columns.items():
             for group, found_ in groups.items():
                 relation = next((e for e in found_ if isinstance(e, dict) and set(e) & {"lookup", *ARITHMETIC}), None) \
@@ -420,45 +435,43 @@ def survey(env, outputs, expected, helpers, private, mask):
     return view, checks, shapes, unexplained
 
 
-def learn(workbook, target, bank, answers):
+def learn(workbook, target, sources, answers):
     """Everything code can establish before the model is asked: outputs, evidence, candidates, checks."""
-    found = find_tables(sheet_rows(workbook))
+    found, questions = read_sources(workbook, sources)
     keys = table_keys(found)
     spec = {"tables": {key: table_spec(t) for key, t in zip(keys, found)}, "outputs": {}}
     bound, _ = bind_tables(spec, found)
     outputs, expected, helpers = learn_outputs(spec, bound, find_tables(sheet_rows(target)))
+    for key in [k for k in outputs if bound[k]["file"] != str(workbook)]:  # only the input workbook is written
+        del outputs[key], expected[key]
     if not outputs:
         raise ValueError("The target adds no rows and fills no columns compared with the input; nothing to learn.")
     spec["outputs"] = outputs
-    statement, questions = statement_with_answers(bank, answers)
-    env = environment(spec, bound, statement, answers)
+    env = environment(spec, bound, {})
     env["probe"] = True
-    names = name_evidence(env)
+    names = link_evidence(env)
     if names:
         best = names[0]
-        result = match_receipts(statement, bound[best["table"]], best["column"], "full_or_unique_prefix", {})
-        env.update(match=best["table"], receipts=result["receipts"], deposits=result["deposits"])
-        questions += currency_questions(env, best["table"])
+        run_link(env, best["table"], best["text"], best["to"], best["name"], "full_or_unique_prefix")
+        questions += unit_questions(env, best["table"], best["to"])
+        env["questions"] = {}  # rows code could not link stay unlinked here; the plan decides how to link
     settled = [q for q in questions if answered(q, answers) is not None]
     questions = [q for q in questions if answered(q, answers) is None]
     # Pass 1 finds which tables the outputs read; only their values are private (pass 2 masks them).
     first = survey(env, outputs, expected, helpers, set(), lambda value: value)[0]
-    sources = {env["refs"][ref][0] for ref in env["refs"] if json.dumps(ref) in json.dumps(first)} | {env.get("match")}
+    sources = {env["refs"][ref][0] for ref in env["refs"] if json.dumps(ref) in json.dumps(first)}
     mask, private = masker(env, sources)
     view, checks, shapes, unexplained = survey(env, outputs, expected, helpers, private, mask)
     for key in unexplained:
         del outputs[key], expected[key]
     used = {ref for ref in env["refs"] if json.dumps(ref) in json.dumps(view)}
-    relevant = {env["refs"][ref][0] for ref in used} | set(outputs) | {n["table"] for n in names}
+    relevant = {env["refs"][ref][0] for ref in used} | set(outputs) | {n[k] for n in names for k in ("table", "to")}
     relevant |= {node["lookup"]["table"] for node in walk(view) if "lookup" in node}
     inputs = [{"table": key, "records": len(bound[key]["records"]),
                "columns": {name: "|".join(meta["types"]) for name, meta in spec["tables"][key]["columns"].items()},
                **({"units": {k: v for k, v in bound[key]["units"].items() if v}} if any(bound[key]["units"].values()) else {})}
               for key in spec["tables"] if key in relevant and outputs.get(key, {}).get("op") != "append_rows"]
-    profile = {"input_tables": inputs,
-               "statement": {"currency": statement["currency"], "deposits": sum(t["kind"] == "deposit" for t in statement["transactions"]),
-                             "withdrawals": sum(t["kind"] != "deposit" for t in statement["transactions"])},
-               "name_matching": names, "outputs": [{"table": key, **item} for key, item in view.items()],
+    profile = {"input_tables": inputs, "links": names, "outputs": [{"table": key, **item} for key, item in view.items()],
                **({"target_changes_not_reproduced": unexplained} if unexplained else {})}
     refs = sorted(ref for ref, (key, name) in env["refs"].items() if key in relevant
                   and outputs.get(key, {}).get("op") != "append_rows" and name not in outputs.get(key, {}).get("columns", []))
@@ -468,7 +481,7 @@ def learn(workbook, target, bank, answers):
                    "tables": sorted(k for k in relevant if bound[k]["records"] and outputs.get(k, {}).get("op") != "append_rows"),
                    "lookup_tables": sorted(k for k in relevant if len(bound[k]["records"]) > 1 and k not in outputs),
                    "outputs": outputs}
-    return {"spec": spec, "bound": bound, "statement": statement, "expected": expected, "checks": checks,
+    return {"spec": spec, "bound": bound, "expected": expected, "checks": checks,
             "fits": {key: item.get("fits", []) for key, item in view.items()},
             "profile": profile, "schema_view": schema_view, "mask": mask, "questions": questions, "settled": settled,
             "shapes": shapes}
@@ -485,7 +498,8 @@ def reply_schema(view):
     text = {"type": "string"}
     atom = {"anyOf": [{"type": "null"}, text, {"type": "number"}, {"type": "boolean"}, obj({"col": enum(view["refs"])}),
                       obj({"var": enum(VARS)}), obj({"out": enum(view["headers"])})]
-            + ([obj({"unit": enum(view["units"])})] if view["units"] else [])}
+            + ([obj({"unit": enum(view["units"])})] if view["units"] else [])
+            + [obj({op: enum(view["refs"])}) for op in AGGREGATES]}
     pair = {"type": "array", "items": ref("atom"), "minItems": 2, "maxItems": 2}
     part = {"anyOf": [ref("atom")] + [obj({op: pair}) for op in ARITHMETIC]
             + ([obj({"lookup": obj({"table": enum(view["lookup_tables"]), "where": enum(view["labels"]), "equals": ref("atom"),
@@ -494,12 +508,13 @@ def reply_schema(view):
     expression = {"anyOf": [ref("value"), obj({"line": {"type": "array", "items": ref("value"), "minItems": 1, "maxItems": MAX_LINES}})]}
     variants = []
     if view["tables"]:
-        variants.append(obj({"op": enum(["match_receipts"]), "intent": text, "table": enum(view["tables"]),
-                             "name": enum(view["labels"]), "policy": enum(POLICIES)}))
+        variants.append(obj({"op": enum(["link_rows"]), "intent": text, "table": enum(view["tables"]),
+                             "text": enum(view["labels"]), "to": enum(view["tables"]), "name": enum(view["labels"]),
+                             "policy": enum(POLICIES)}))
     for key, out in view["outputs"].items():
         properties = {"op": enum([out["op"]]), "intent": text, "table": enum([key])}
         if out["op"] == "append_rows":
-            properties.update(for_each=enum(view["tables"] + ["statement"]), only_received={"type": "boolean"},
+            properties.update(for_each=enum(view["tables"]), only_linked={"type": "boolean"},
                               lines={"type": "integer"})
         properties["columns"] = obj({column: ref("expression") for column in out["columns"]})
         variants.append(obj(properties))
@@ -527,24 +542,34 @@ def adopt(plan, previous, wrong, evidence, fits):
     if not previous:
         return []
     before = {(s.get("table"), c): e for s in previous["steps"] for c, e in s.get("columns", {}).items()}
-    iterations = {s.get("table"): {k: s.get(k) for k in ("for_each", "only_received", "lines")}
+    iterations = {s.get("table"): {k: s.get(k) for k in ("for_each", "only_linked", "lines")}
                   for s in previous["steps"] if s.get("op") == "append_rows"}
     adopted = []
     for step in plan.get("steps", []):
         if not isinstance(step, dict) or not isinstance(step.get("columns"), dict):
             continue
-        table, now = step.get("table"), {k: step.get(k) for k in ("for_each", "only_received", "lines")}
+        table, now = step.get("table"), {k: step.get(k) for k in ("for_each", "only_linked", "lines")}
         if (table, "row_count") in wrong and iterations.get(table) == now and len(fits.get(table, [])) == 1 and fits[table][0] != now:
             step.update(fits[table][0])
             adopted.append(f"{table} iteration")
         for column, expression in step["columns"].items():
             key = (step.get("table"), column)
-            only = evidence.get(key[0], {}).get(column, {})
-            only = only.get("all lines", only.get("all rows")) if len(only) == 1 else None
-            if key in wrong and before.get(key) == expression and isinstance(only, list) and len(only) == 1 and only[0] != expression:
-                step["columns"][column] = only[0]
+            verified = only_candidate(evidence.get(key[0], {}).get(column, {}))
+            if key in wrong and before.get(key) == expression and verified is not None and verified != expression:
+                step["columns"][column] = verified
                 adopted.append(f"{key[0]}.{column}")
     return adopted
+
+
+def only_candidate(groups):
+    """The one verified expression for a column: a single all-lines candidate, or one candidate per line."""
+    whole = groups.get("all lines", groups.get("all rows"))
+    if isinstance(whole, list):
+        return whole[0] if len(whole) == 1 else None
+    lines = [groups[k] for k in sorted(groups, key=lambda k: int(k.split()[1])) if k.startswith("line ")]
+    if lines and all(isinstance(g, list) and len(g) == 1 for g in lines):
+        return {"line": [g[0] for g in lines]}
+    return None
 
 
 def restore(plan, locked):
@@ -569,15 +594,15 @@ def matching(plan, outputs, differences, errors):
     wrong = {(d["table"], d.get("column")) for d in differences} | {(e["table"], e["column"]) for e in errors}
     locked = {}
     for step in plan["steps"]:
-        if step["op"] == "match_receipts" or step["table"] in broken or step["table"] not in outputs:
+        if step["op"] == "link_rows" or step["table"] in broken or step["table"] not in outputs:
             continue
-        locked[(step["table"], None)] = {k: step[k] for k in ("for_each", "only_received", "lines") if k in step}
+        locked[(step["table"], None)] = {k: step[k] for k in ("for_each", "only_linked", "lines") if k in step}
         locked.update({(step["table"], c): e for c, e in step["columns"].items() if (step["table"], c) not in wrong})
     return locked
 
 
 def summarise(differences, plan, errors, fits, evidence):
-    lines = {s["table"]: s.get("lines", 1) for s in plan["steps"] if s["op"] != "match_receipts"}
+    lines = {s["table"]: s.get("lines", 1) for s in plan["steps"] if s["op"] != "link_rows"}
     expressions = {(s["table"], c): e for s in plan["steps"] for c, e in s.get("columns", {}).items()}
     miscounted = {d["table"] for d in differences if d.get("check") == "row_count"}
     groups = {}
@@ -587,7 +612,7 @@ def summarise(differences, plan, errors, fits, evidence):
             groups[(d["table"], "row_count", None)] = {
                 "table": d["table"], "problem": f"your step produced {d['actual']} rows; the example has {d['expected']}. "
                 "Row-by-row differences are hidden until the count matches.",
-                "your_iteration": {k: step[k] for k in ("for_each", "only_received", "lines")},
+                "your_iteration": {k: step[k] for k in ("for_each", "only_linked", "lines")},
                 "iterations_that_fit": fits.get(d["table"], [])}
             continue
         if "check" in d or d["table"] in miscounted:
@@ -627,17 +652,61 @@ def prune(spec, plan, checks):
         if json.dumps(ref) in text:
             keep.setdefault(key, set()).add(name)
     for step in plan["steps"]:
-        if step["op"] == "match_receipts":
-            keep.setdefault(step["table"], set()).add(step["name"])
+        if step["op"] == "link_rows":
+            keep.setdefault(step["table"], set()).add(step["text"])
+            keep.setdefault(step["to"], set()).add(step["name"])
         else:
             keep.setdefault(step["table"], set()).update(spec["outputs"][step["table"]]["columns"])
-            if step.get("for_each") not in (None, "statement"):
+            if step.get("for_each"):
                 keep.setdefault(step["for_each"], set())
     for node in walk([plan, checks]):
         if "lookup" in node:
             keep.setdefault(node["lookup"]["table"], set()).update({node["lookup"]["where"], node["lookup"]["return"]})
     return {key: {**spec["tables"][key], "columns": {n: m for n, m in spec["tables"][key]["columns"].items() if n in names}}
             for key, names in keep.items()}
+
+
+def guess_roles(paths):
+    """Which uploaded file is which, from the content: the target is the workbook that adds rows or fills
+    columns compared with another one (that one is the input); text files are context; schema-3 JSON
+    files are workflows; every other workbook or PDF is a source. Returns a dict, with "questions" on doubt."""
+    roles = {"input": None, "target": None, "sources": [], "context": [], "workflows": [], "questions": []}
+    workbooks = []
+    for path in map(Path, paths):
+        suffix = path.suffix.lower()
+        if suffix in (".txt", ".md"):
+            roles["context"].append(path)
+        elif suffix == ".json":
+            try:
+                if json.loads(path.read_text()).get("schema_version") == 3:
+                    roles["workflows"].append(path)
+            except (ValueError, AttributeError):
+                pass
+        elif suffix in (".xlsx", ".xlsm"):
+            workbooks.append(path)
+        elif suffix == ".pdf":
+            roles["sources"].append(path)
+    tables = {path: find_tables(sheet_rows(path)) for path in workbooks}
+    pairs = []
+    for first, second in product(workbooks, workbooks):
+        if first == second:
+            continue
+        spec = {"tables": {f"{t['sheet']}@{t['row']}": table_spec(t) for t in tables[first]}, "outputs": {}}
+        bound, _ = bind_tables(spec, tables[first])
+        outputs, expected, _ = learn_outputs(spec, bound, tables[second])
+        cells = sum(len(rows) * len(outputs[key]["columns"]) for key, rows in expected.items())
+        if cells:
+            pairs.append((cells, first, second))
+    pairs.sort(reverse=True)
+    if pairs:
+        if len(pairs) > 1 and pairs[1][0] == pairs[0][0]:
+            roles["questions"].append(question("roles", "Which workbook is the completed example?", "target",
+                                               options=sorted({str(p[2]) for p in pairs if p[0] == pairs[0][0]})))
+        _, roles["input"], roles["target"] = pairs[0]
+    elif len(workbooks) == 1 or (workbooks and roles["workflows"]):
+        roles["input"] = workbooks[0]  # one workbook (or a workflow to run): it is the input
+    roles["sources"] += [p for p in workbooks if p not in (roles["input"], roles["target"])]
+    return roles
 
 
 def ask_until_settled(items, answers, ask):
@@ -649,21 +718,23 @@ def ask_until_settled(items, answers, ask):
     return [item for item in items if answered(item, answers) is None]
 
 
-def build_workflow(workbook, target, bank, context, answers, client, events, max_attempts=MAX_ATTEMPTS, ask=None):
+def build_workflow(workbook, target, sources, context, answers, client, events, max_attempts=MAX_ATTEMPTS, ask=None):
     """answers: {question id: answer} given up front; ask(questions) -> answers prompts a person when set."""
     if type(max_attempts) is not int or not 1 <= max_attempts <= MAX_ATTEMPTS:
         raise ValueError(f"Build budget must be between one and {MAX_ATTEMPTS} model calls.")
     if Path(context).suffix.lower() == ".pdf":
         raise ValueError("Provide the customer context as a plain-text file, not a PDF.")
     answers = dict(answers or {})
-    asked = {}
+    # Answers to the model's questions from an earlier build (e.g. given in the UI) go back to the model.
+    asked = {key: {"id": key, "question": value["question"], "scope": "workflow"} for key, value in answers.items()
+             if key.startswith("model_question:") and isinstance(value, dict) and value.get("question")}
     events.emit("run_start", phase="build", model=client.model, prompt_version=PROMPT_VERSION,
                 max_attempts=max_attempts, max_tokens_per_call=client.max_tokens)
     try:
-        learned = learn(workbook, target, bank, answers)
+        learned = learn(workbook, target, sources, answers)
         asked.update({q["id"]: q for q in learned["questions"] + learned["settled"]})
         if ask_until_settled(learned["questions"], answers, ask) != learned["questions"]:
-            learned = learn(workbook, target, bank, answers)
+            learned = learn(workbook, target, sources, answers)
         if learned["questions"]:
             return needs_input(events, learned["questions"])
         spec, mask = learned["spec"], learned["mask"]
@@ -698,7 +769,7 @@ def build_workflow(workbook, target, bank, context, answers, client, events, max
                 else:
                     if reply.get("status") != "ready" or not isinstance(reply.get("workflow"), dict):
                         raise ValueError("Expected status ready with a workflow, or needs_input with a question.")
-                    plan = reply["workflow"]
+                    plan = normalise_plan(reply["workflow"])
                     evidence = {o["table"]: o["columns"] for o in learned["profile"]["outputs"]}
                     unpaste(plan, evidence)
                     restored = restore(plan, locked)
@@ -711,7 +782,7 @@ def build_workflow(workbook, target, bank, context, answers, client, events, max
                         events.emit("locked_fields", attempt=attempt, restored=restored)
                     (folder / "plan.json").write_text(json.dumps(plan, indent=2))
                     events.emit("candidate", attempt=attempt, plan=plan)
-                    env = environment(spec, learned["bound"], learned["statement"], answers)
+                    env = environment(spec, learned["bound"], answers)
                     outputs, errors = execute_plan(plan, spec, env, events)
                     differences = compare_outputs({key: keyed(o) for key, o in outputs.items()}, learned["expected"])
                     failures = check_outputs(learned["checks"], outputs, env)
@@ -723,7 +794,7 @@ def build_workflow(workbook, target, bank, context, answers, client, events, max
                         written = compare_outputs(read_outputs(output, spec), learned["expected"])
                         if written:
                             raise ValueError(f"The written workbook differs from the target in {len(written)} cells.")
-                        return save(events, spec, plan, learned["checks"], asked, answers, attempt, output, outputs, workbook, target)
+                        return save(events, spec, plan, learned["checks"], asked, answers, attempt, output, outputs, workbook, target, sources)
                     miscounted = {d["table"] for d in differences if "check" in d}  # cells misalign; not evidence
                     previous_plan = plan
                     previous_wrong = {(d["table"], d.get("column")) for d in differences if d["table"] not in miscounted} | \
@@ -763,12 +834,13 @@ def needs_input(events, questions):
     return {"status": "needs_input", "questions": questions, "question_file": str(path), "run_dir": str(events.directory)}
 
 
-def save(events, spec, plan, checks, asked, answers, attempt, output, outputs, workbook, target):
+def save(events, spec, plan, checks, asked, answers, attempt, output, outputs, workbook, target, sources):
     recorded = [{"id": key, "question": item["question"], "answer": answered(item, answers), "by": "person"}
                 for key, item in asked.items() if item.get("scope") == "workflow" and answered(item, answers) is not None]
     saved = {"schema_version": 3, "workflow_version": 1, "plan": plan, "tables": prune(spec, plan, checks),
              "outputs": spec["outputs"], "checks": checks, "answers": recorded,
-             "built_from": {"input": Path(workbook).name, "target": Path(target).name, "prompt_version": PROMPT_VERSION}}
+             "built_from": {"input": Path(workbook).name, "target": Path(target).name,
+                            "sources": [Path(p).name for p in sources or []], "prompt_version": PROMPT_VERSION}}
     path = events.directory / "workflow.json"
     with path.open("x", encoding="utf-8") as stream:
         json.dump(saved, stream, indent=2)

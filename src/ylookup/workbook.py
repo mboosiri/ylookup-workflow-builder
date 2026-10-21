@@ -88,7 +88,10 @@ def write_outputs(source, destination, bound, outputs):
     book = load_workbook(source, data_only=False)
     try:
         for key, out in outputs.items():
-            table, sheet = bound[key], book[bound[key]["sheet"]]
+            table = bound[key]
+            if table.get("file") not in (None, str(source)):
+                raise ValueError(f"{key} was found in {Path(table['file']).name}; outputs are only written into the input workbook.")
+            sheet = book[table["sheet"]]
             columns = table["columns"]
             if out["op"] == "append_rows":
                 first = table["row"] + 1

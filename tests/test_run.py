@@ -8,7 +8,7 @@ from unittest.mock import patch
 from openpyxl import load_workbook
 
 from ylookup.planner import run_workflow
-from fixtures import built, edit, parsed
+from fixtures import built, edit, pages
 
 
 class RunTest(unittest.TestCase):
@@ -19,9 +19,9 @@ class RunTest(unittest.TestCase):
         self.workflow, self.source, self.bank, _ = built(self.folder)
 
     def run_it(self, name, workflow=None, answers=None):
-        with patch("ylookup.planner.read_statement", return_value=parsed()):
+        with patch("ylookup.sources.pdf_pages", return_value=pages()):
             started = time.perf_counter()
-            result = run_workflow(workflow or self.workflow, self.source, self.bank, self.folder / name, answers=answers)
+            result = run_workflow(workflow or self.workflow, self.source, [self.bank], self.folder / name, answers=answers)
         self.elapsed = time.perf_counter() - started
         return result
 

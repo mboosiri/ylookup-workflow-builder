@@ -72,7 +72,7 @@ def prompt(questions, reader=sys.stdin, writer=sys.stderr):
 def run_until_settled(args, answers, ask):
     """Phase 2 has no model, so a question stops it; when a person is there, ask and run again."""
     asked, directory, round_ = set(), args.run_dir, 1
-    result = run_workflow(args.workflow, args.input, args.bank, directory, answers=answers)
+    result = run_workflow(args.workflow, args.input, args.sources, directory, answers=answers)
     while result["status"] == "needs_input" and ask:
         fresh = [q for q in result["questions"] if q["id"] not in asked]
         if not fresh:
@@ -81,7 +81,7 @@ def run_until_settled(args, answers, ask):
         answers.update(ask(fresh))
         round_ += 1
         directory = args.run_dir.with_name(f"{args.run_dir.name}-{round_}")
-        result = run_workflow(args.workflow, args.input, args.bank, directory, answers=answers)
+        result = run_workflow(args.workflow, args.input, args.sources, directory, answers=answers)
     return result
 
 
@@ -93,17 +93,17 @@ def main() -> None:
     full = commands.add_parser("build", help="Phase 1: learn, execute and verify a workflow against a target.")
     full.add_argument("--input", type=Path, required=True)
     full.add_argument("--target", type=Path, required=True)
-    full.add_argument("--bank", type=Path, required=True)
+    full.add_argument("--sources", type=Path, nargs="*", default=[], help="Other source files: workbooks or PDF tables (e.g. a bank statement).")
     full.add_argument("--context", type=Path, required=True)
     full.add_argument("--max-attempts", type=int, choices=range(1, MAX_ATTEMPTS + 1), default=MAX_ATTEMPTS)
     run = commands.add_parser("run", help="Phase 2: run a saved workflow on an input; no target or model.")
     run.add_argument("--workflow", type=Path, required=True)
     run.add_argument("--input", type=Path, required=True)
-    run.add_argument("--bank", type=Path, required=True)
+    run.add_argument("--sources", type=Path, nargs="*", default=[], help="Other source files: workbooks or PDF tables (e.g. a bank statement).")
     adapt = commands.add_parser("adapt", help="Phase 3: update a saved workflow for a changed input; saves v+1.")
     adapt.add_argument("--workflow", type=Path, required=True)
     adapt.add_argument("--input", type=Path, required=True)
-    adapt.add_argument("--bank", type=Path, required=True)
+    adapt.add_argument("--sources", type=Path, nargs="*", default=[], help="Other source files: workbooks or PDF tables (e.g. a bank statement).")
     adapt.add_argument("--context", type=Path)
     for command in (full, run, adapt):
         command.add_argument("--answers", type=Path, help='JSON {"question id": "answer"}, e.g. from an earlier questions.json.')
@@ -124,12 +124,12 @@ def main() -> None:
             ask = None if args.no_input or not sys.stdin.isatty() else prompt
             if args.command == "build":
                 key, model = settings()
-                result = build_workflow(args.input, args.target, args.bank, args.context, answers,
+                result = build_workflow(args.input, args.target, args.sources, args.context, answers,
                                         OpenRouter(key, model, BUILD_PROMPT_VERSION, 8000),
                                         Events(args.run_dir, (key,)), args.max_attempts, ask)
             elif args.command == "adapt":
                 key, model = settings()
-                result = adapt_workflow(args.workflow, args.input, args.bank, args.context,
+                result = adapt_workflow(args.workflow, args.input, args.sources, args.context,
                                         OpenRouter(key, model, ADAPT_PROMPT_VERSION, 1500), args.run_dir, answers, ask)
             else:
                 result = run_until_settled(args, answers, ask)

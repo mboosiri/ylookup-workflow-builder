@@ -13,7 +13,7 @@ from pathlib import Path
 from .events import Events
 from .builder import SMALL, walk
 from .planner import run_workflow
-from .sources import at, canon, find_tables, mapping_problem, normalise, sheet_rows
+from .sources import at, canon, mapping_problem, normalise, read_sources
 
 
 PROMPT_VERSION = "adapt-headers-v2"
@@ -34,9 +34,11 @@ def usage(saved, key, name):
     """Where the workflow uses a column, so the model sees its role and not only its old name."""
     ref, found = f"{key}.{name}", []
     for step in saved["plan"]["steps"]:
-        if step["op"] == "match_receipts":
-            if (step["table"], step["name"]) == (key, name):
-                found.append("bank deposits are matched to records by this name column")
+        if step["op"] == "link_rows":
+            if (step["table"], step["text"]) == (key, name):
+                found.append(f"its text names the {step['to']} record each row is linked to")
+            if (step["to"], step["name"]) == (key, name):
+                found.append(f"rows of {step['table']} are linked to records by this name column")
             continue
         if step["table"] == key and name in step["columns"]:
             found.append(f"the workflow writes this column: {step['intent']}")
@@ -54,9 +56,9 @@ def usage(saved, key, name):
     return sorted(set(found))
 
 
-def samples(workbook, item):
+def samples(workbook, sources, item):
     """A few values per candidate, only for large reference tables (a chart of accounts), never for people or entities."""
-    table = next((t for t in find_tables(sheet_rows(workbook)) if f"{t['sheet']}!row {t['row']}" == item["where"]), None)
+    table = next((t for t in read_sources(workbook, sources)[0] if f"{t['sheet']}!row {t['row']}" == item["where"]), None)
     if table is None or len(table["records"]) <= SMALL:
         return {}
     columns = {h: c for c, h in table["headers"].items()}
@@ -70,11 +72,11 @@ def proposal_schema(missing):
         "question": {"type": ["string", "null"]}}}
 
 
-def propose(saved, missing, context, client, directory, workbook):
+def propose(saved, missing, context, client, directory, workbook, sources):
     request = {"customer_context": Path(context).read_text() if context else "", "workflow_intent": saved["plan"]["intent"],
                "missing_columns": []}
     for ref, item in missing.items():
-        examples = samples(workbook, item)
+        examples = samples(workbook, sources, item)
         written = item["column"] in saved["outputs"].get(item["table"], {}).get("columns", [])
         request["missing_columns"].append({
             "column": ref, "previous_header": item["previous_header"], "held_at_build": item["types"],
@@ -110,7 +112,7 @@ def adapted_spec(saved, result, answers):
     return tables, mapped
 
 
-def adapt_workflow(path, workbook, bank, context, client, directory, answers=None, ask=None):
+def adapt_workflow(path, workbook, sources, context, client, directory, answers=None, ask=None):
     """answers: {question id: answer} from a person; ask(questions) -> answers prompts one when set."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=False)
@@ -120,7 +122,7 @@ def adapt_workflow(path, workbook, bank, context, client, directory, answers=Non
                for key, value in (answers or {}).items()}
     proposed, asked, notes = set(), set(), {}
     for round_ in range(1, ROUNDS + 1):
-        result = run_workflow(path, workbook, bank, directory / f"run-{round_}", saved, answers)
+        result = run_workflow(path, workbook, sources, directory / f"run-{round_}", saved, answers)
         if result["status"] == "success":
             tables, mapped = adapted_spec(saved, result, answers)
             if not mapped:
@@ -133,7 +135,13 @@ def adapt_workflow(path, workbook, bank, context, client, directory, answers=Non
             return {**result, "adapted": True, "mapping": mapped, "workflow": str(destination), "workflow_version": version + 1}
         questions = result.get("questions", [])
         if not any(q["code"] in ("column_mapping", "table_choice") for q in questions):
-            return {**result, "adapted": False, "note": "Nothing renamed or moved is left to adapt; the run stopped for the reasons listed."}
+            fresh_items = [q for q in questions if q["id"] not in asked]
+            if ask is None or not fresh_items:
+                return {**result, "adapted": False, "note": "Nothing renamed or moved is left to adapt; the run stopped for the reasons listed."}
+            asked.update(q["id"] for q in fresh_items)  # data questions (a blank value, an unclear payer): ask, then run again
+            for key, reply in (ask(fresh_items) or {}).items():
+                answers[key] = {**(reply if isinstance(reply, dict) else {"answer": reply}), "by": "person"}
+            continue
         missing = {q["id"].split(":", 1)[1]: q for q in questions if q["code"] == "column_mapping"}
         gone = [ref for ref, q in missing.items() if not q["options"]]
         if gone:
@@ -142,7 +150,7 @@ def adapt_workflow(path, workbook, bank, context, client, directory, answers=Non
         fresh = {ref: q for ref, q in missing.items() if ref not in proposed}
         if fresh and client is not None and not any(q["code"] == "table_choice" for q in questions):
             proposed.update(fresh)
-            mappings, model_question = propose(saved, fresh, context, client, directory / f"run-{round_}", workbook)
+            mappings, model_question = propose(saved, fresh, context, client, directory / f"run-{round_}", workbook, sources)
             taken = {}
             for ref, header in mappings.items():
                 if ref not in fresh or header is None:

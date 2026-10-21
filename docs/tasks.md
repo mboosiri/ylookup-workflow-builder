@@ -14,6 +14,14 @@
 | ✅ V06 | Harder adapt variants | 9 new variants: renamed constants, renamed chart (and its tab), reshuffled tracker, distractor column, duplicate name, unknown payer, extra investor | `scripts/stress_variants.py`, README table |
 | ✅ V07 | General, interactive questions | Every question has a stable id and options when code can act. The terminal and UI prompt, `--answers` replays, and policy answers are recorded in `workflow.json`. | Interactive build and adapt via a pty; `test_a_model_question_is_asked_and_the_answer_is_used_and_recorded` |
 
+## Review round 2
+
+| ID | Feedback | What changed | Evidence |
+|---|---|---|---|
+| ✅ V08 | The agent should not expect a bank statement | No statement parser or receipt step: every file is read as tables (PDF header line + dated rows), and matching is a general `link_rows` between any text column and name column, chosen by the model from link evidence | `pdf_tables`, `link_rows`, `link_evidence`; 30/30 live builds |
+| ✅ V09 | No fixed file roles | Roles from content (`guess_roles`); `--sources` takes any workbooks or PDFs | `test_file_roles_come_from_the_content_not_the_names` |
+| ✅ V10 | UI: file upload, chat, workflow trace | One chat page: attach files, describe the job, answer questions inline (buttons or text), live trace, build → run → adapt in one conversation | Clicked through live: build with two inline questions, then adapt of `constants-renamed` to v2 |
+
 ## Done earlier
 
 | ID | Task |

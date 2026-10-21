@@ -11,12 +11,13 @@ from pathlib import Path
 import re
 
 from .events import Events
-from .sources import (answered, bind_tables, binding_changes, canon, equivalent, find_tables, kind, match_receipts,
-                      number, question, read_statement, sheet_rows)
+from .sources import (answered, bind_tables, binding_changes, canon, equivalent, kind, link_rows, number, question,
+                      read_sources)
 from .workbook import compare_outputs, plain, read_outputs, write_outputs
 
 
-VARS = ["receipt.amount", "receipt.date", "receipt.description", "entry", "line", "row", "statement.currency"]
+VARS = ["entry", "line", "row"]
+AGGREGATES = ["sum", "first"]
 ARITHMETIC = ["add", "sub", "mul", "div"]
 POLICIES = ["full_name_only", "full_or_unique_prefix"]
 MAX_LINES = 9
@@ -64,6 +65,49 @@ def lookup(env, table_key, where, wanted, returned):
     return next(iter(values.values()))
 
 
+def related(ctx, key):
+    """The record of table `key` a row reads: its own, the one it is linked to, or a one-row table's."""
+    env = ctx["env"]
+    if key == ctx.get("table"):
+        return ctx["record"]
+    link = env["links"].get(ctx.get("table"))
+    if link and link["to"] == key:
+        index = link["rows"].get(ctx["index"])
+        return None if index is None else env["tables"][key]["records"][index]
+    if len(env["tables"][key]["records"]) == 1:
+        return env["tables"][key]["records"][0]
+    raise ValueError(f"{key} has {len(env['tables'][key]['records'])} rows and this step neither iterates it nor is linked "
+                     "to it; use lookup, or sum/first over linked rows.")
+
+
+def linked_rows(ctx, key):
+    back = ctx["env"]["linked"].get(ctx.get("table"))
+    if not back or back["from"] != key:
+        raise ValueError(f"sum/first of {key} needs a link_rows step linking {key} to {ctx.get('table')} earlier in the plan.")
+    return [ctx["env"]["tables"][key]["records"][j] for j in back["records"].get(ctx["index"], [])]
+
+
+def aggregate(op, arg, ctx):
+    """sum: total over the rows linked to this record (0 without any); first: their value, asked when they differ."""
+    env = ctx["env"]
+    key, name = env["refs"][arg]
+    rows = linked_rows(ctx, key)
+    values = [r["values"].get(name) for r in rows if kind(r["values"].get(name))]
+    if op == "sum":
+        return sum((number(v) for v in values), Decimal(0))
+    distinct = {canon(v): v for v in values}
+    if len(distinct) <= 1:
+        return next(iter(distinct.values()), None)
+    where = f"{ctx['table']} row {ctx['record']['row']}"
+    item = question("linked_values", f"{where} is linked to {len(rows)} {key} rows with different {name}. Which one applies?",
+                    f"{arg} for {where}", options=sorted(text(v) for v in distinct.values()))
+    reply = answered(item, env["answers"])
+    if reply is None:
+        env["questions"][item["id"]] = item
+        return None
+    return next((v for v in distinct.values() if text(v) == reply), None)
+
+
 def evaluate(expression, ctx):
     if not isinstance(expression, dict):
         return expression
@@ -71,26 +115,15 @@ def evaluate(expression, ctx):
     env = ctx["env"]
     if op == "col":
         key, _ = env["refs"][arg]
-        table = env["tables"][key]
-        if key == ctx.get("table"):
-            record = ctx["record"]
-        elif len(table["records"]) == 1:
-            record = table["records"][0]
-        else:
-            raise ValueError(f"{arg}: {key} has {len(table['records'])} rows and this step does not iterate it; use lookup.")
+        record = related(ctx, key)
         return None if record is None else source_value(env, arg, record)
+    if op in AGGREGATES:
+        return aggregate(op, arg, ctx)
     if op == "unit":
         key, name = env["refs"][arg]
         return env["tables"][key]["units"].get(name)
     if op == "var":
-        if arg in ("entry", "line", "row"):
-            return ctx[arg]
-        if arg == "statement.currency":
-            return env["statement"]["currency"]
-        if "receipts" not in env:
-            raise ValueError(f"{arg} needs a match_receipts step earlier in the plan.")
-        field = arg.split(".", 1)[1]
-        return (ctx.get("receipt") or {}).get(field, Decimal(0) if field == "amount" else None)
+        return ctx[arg]
     if op == "out":
         return ctx["out"](arg)
     if op == "line":
@@ -135,25 +168,22 @@ def emit(columns, ctx):
     return {name: values[name] for name in columns}, errors
 
 
-def entries(env, for_each, only_received):
-    """(iterated table, record, receipt) for each entry of an output step."""
-    if for_each == "statement":
-        if "deposits" not in env:
-            raise ValueError("for_each statement needs a match_receipts step earlier in the plan.")
-        table = env["tables"][env["match"]]
-        return [(env["match"], None if d["record"] is None else table["records"][d["record"]],
-                 {"amount": number(d["amount"]), "date": date.fromisoformat(d["date"]), "description": d["description"]})
-                for d in env["deposits"]]
-    receipts = env.get("receipts", {}) if env.get("match") == for_each else {}
-    result = [(for_each, record, receipts.get(i)) for i, record in enumerate(env["tables"][for_each]["records"])]
-    return [e for e in result if not only_received or (e[2] and e[2]["amount"] != 0)]
+def entries(env, for_each, only_linked):
+    """(table, record, index) for each entry of an output step; only_linked keeps records with a link."""
+    link, back = env["links"].get(for_each), env["linked"].get(for_each)
+    result = []
+    for index, record in enumerate(env["tables"][for_each]["records"]):
+        if only_linked and not ((link and link["rows"].get(index) is not None) or (back and back["records"].get(index))):
+            continue
+        result.append((for_each, record, index))
+    return result
 
 
-def contexts(env, for_each, only_received, lines):
+def contexts(env, for_each, only_linked, lines):
     rows = []
-    for entry, (table, record, receipt) in enumerate(entries(env, for_each, only_received), 1):
+    for entry, (table, record, index) in enumerate(entries(env, for_each, only_linked), 1):
         for line in range(1, lines + 1):
-            rows.append({"env": env, "table": table, "record": record, "receipt": receipt,
+            rows.append({"env": env, "table": table, "record": record, "index": index,
                          "entry": entry, "line": line, "row": len(rows) + 1})
     return rows
 
@@ -173,7 +203,7 @@ def validate_expression(expression, refs, headers, lines, depth=0):
         raise ValueError(f"expected null, a literal or a one-key object, got {json.dumps(expression)[:80]}")
     (op, arg), = expression.items()
     inner = lambda item: validate_expression(item, refs, headers, lines, depth + 1)
-    if op in ("col", "unit"):
+    if op in ("col", "unit", *AGGREGATES):
         if arg not in refs:
             raise ValueError(f"unknown column {arg!r}")
     elif op == "var":
@@ -210,8 +240,8 @@ def validate_expression(expression, refs, headers, lines, depth=0):
         raise ValueError(f"unknown expression operation {op!r}")
 
 
-PSEUDO = re.compile(r"^\{?\s*['\"]?(col|var|unit|out)['\"]?\s*:\s*['\"]?([^\[\]{},]+?)['\"]?\s*\}?$")
-OPERATION = re.compile(r"^\s*\{?\s*['\"]?(col|var|unit|out|line|concat|lookup|add|sub|mul|div)['\"]?\s*:")
+PSEUDO = re.compile(r"^\{?\s*['\"]?(col|var|unit|out|sum|first)['\"]?\s*:\s*['\"]?([^\[\]{},]+?)['\"]?\s*\}?$")
+OPERATION = re.compile(r"^\s*\{?\s*['\"]?(col|var|unit|out|sum|first|line|concat|lookup|add|sub|mul|div)['\"]?\s*:")
 
 
 def unwrap(expression, lines):
@@ -235,13 +265,19 @@ def unwrap(expression, lines):
     return {op: unwrap(arg, lines) if isinstance(arg, list) else arg}
 
 
+def normalise_plan(plan):
+    """Apply unwrap() to every column expression, in place; returns the plan."""
+    for step in plan.get("steps", []) if isinstance(plan, dict) and isinstance(plan.get("steps"), list) else []:
+        if isinstance(step, dict) and isinstance(step.get("columns"), dict):
+            step["columns"] = {name: unwrap(e, step.get("lines", 1)) for name, e in step["columns"].items()}
+    return plan
+
+
 def validate_plan(plan, spec):
     """Structure, references and dependencies; every learned output covered exactly once."""
     if not isinstance(plan, dict) or set(plan) != {"intent", "steps"} or not isinstance(plan["steps"], list):
         raise ValueError("Plan validation failures: expected exactly intent and steps.")
-    for step in plan["steps"]:
-        if isinstance(step, dict) and isinstance(step.get("columns"), dict):
-            step["columns"] = {name: unwrap(e, step.get("lines", 1)) for name, e in step["columns"].items()}
+    normalise_plan(plan)
     refs, errors, covered, matched = references(spec), [], set(), False
     for number_, step in enumerate(plan["steps"], 1):
         where = f"step {number_}"
@@ -249,9 +285,11 @@ def validate_plan(plan, spec):
             errors.append(f"{where}: needs an op and a nonempty intent")
             continue
         op, key = step.get("op"), step.get("table")
-        if op == "match_receipts":
-            if set(step) != {"op", "intent", "table", "name", "policy"} or f"{key}.{step['name']}" not in refs:
-                errors.append(f"{where}: match_receipts needs table, name (a column of that table) and policy")
+        if op == "link_rows":
+            if set(step) != {"op", "intent", "table", "text", "to", "name", "policy"} or f"{key}.{step['text']}" not in refs \
+                    or f"{step['to']}.{step['name']}" not in refs or key == step["to"]:
+                errors.append(f"{where}: link_rows needs table and text (its column holding names), to and name "
+                              "(the other table and its name column) and policy")
             elif step["policy"] not in POLICIES:
                 errors.append(f"{where}: policy must be one of {POLICIES}")
             matched = True
@@ -264,24 +302,24 @@ def validate_plan(plan, spec):
         if key in covered:
             errors.append(f"{where}: {key} is produced twice")
         covered.add(key)
-        allowed = {"op", "intent", "table", "columns"} | ({"for_each", "only_received", "lines"} if op == "append_rows" else set())
+        allowed = {"op", "intent", "table", "columns"} | ({"for_each", "only_linked", "lines"} if op == "append_rows" else set())
         if set(step) != allowed:
             errors.append(f"{where}: {op} takes exactly {sorted(allowed)}")
             continue
         lines = step.get("lines", 1)
         if op == "append_rows":
-            if step["for_each"] != "statement" and step["for_each"] not in spec["tables"]:
-                errors.append(f"{where}: for_each must be a table name or statement")
-            if type(step["only_received"]) is not bool or type(lines) is not int or not 1 <= lines <= MAX_LINES:
-                errors.append(f"{where}: only_received must be boolean and lines an integer 1-{MAX_LINES}")
+            if step["for_each"] not in spec["tables"]:
+                errors.append(f"{where}: for_each must be a table name")
+            if type(step["only_linked"]) is not bool or type(lines) is not int or not 1 <= lines <= MAX_LINES:
+                errors.append(f"{where}: only_linked must be boolean and lines an integer 1-{MAX_LINES}")
                 continue
         columns = step["columns"]
         if not isinstance(columns, dict) or set(columns) != set(output["columns"]):
             errors.append(f"{where}: columns must be exactly {output['columns']}")
             continue
-        needs_match = step.get("for_each") == "statement" or '"receipt.' in json.dumps(columns)
-        if needs_match and not matched:
-            errors.append(f"{where}: uses receipts, so a match_receipts step must come before it")
+        needs_link = step.get("only_linked") or re.search(r'"(sum|first)":', json.dumps(columns))
+        if needs_link and not matched:
+            errors.append(f"{where}: uses linked rows, so a link_rows step must come before it")
         for name, expression in columns.items():
             try:
                 validate_expression(expression, refs, columns, lines)
@@ -294,27 +332,28 @@ def validate_plan(plan, spec):
     return plan
 
 
-def environment(spec, bound, statement, answers):
-    return {"spec": spec, "refs": references(spec), "tables": bound, "statement": statement,
-            "answers": answers or {}, "questions": {}}
+def environment(spec, bound, answers):
+    return {"spec": spec, "refs": references(spec), "tables": bound, "answers": answers or {}, "questions": {},
+            "links": {}, "linked": {}}
 
 
-def currency_questions(env, key):
-    units = sorted({u for u in env["tables"][key]["units"].values() if u})
-    currency = env["statement"]["currency"]
-    if not units or not currency or units == [currency]:
+def unit_questions(env, source, target):
+    left = sorted({u for u in env["tables"][source]["units"].values() if u})
+    right = sorted({u for u in env["tables"][target]["units"].values() if u})
+    if not left or not right or left == right:
         return []
     stop = "Stop: the amounts need converting first"
-    return [question("currency_conflict", f"The bank statement is in {currency} but {key} states its amounts in "
-                     f"{', '.join(units)}. How should the amounts be posted?", f"{currency} vs {'/'.join(units)}",
+    return [question("currency_conflict", f"{source} is in {', '.join(left)} but {target} states its amounts in "
+                     f"{', '.join(right)}. How should the amounts be posted?", f"{'/'.join(left)} vs {'/'.join(right)}",
                      options=["Post the amounts as they are, without FX conversion", stop], stop=stop,
-                     scope="workflow", statement_currency=currency, table_currency=units)]
+                     scope="workflow", source_units=left, target_units=right)]
 
 
-def run_match(env, table, name, policy):
-    result = match_receipts(env["statement"], env["tables"][table], name, policy, env["answers"])
-    env.update(match=table, receipts=result["receipts"], deposits=result["deposits"])
-    for item in result["questions"] + [q for q in currency_questions(env, table) if answered(q, env["answers"]) is None]:
+def run_link(env, source, text_, target, name, policy):
+    result = link_rows(env["tables"][source], text_, env["tables"][target], name, policy, env["answers"], source, target)
+    env["links"][source] = {"to": target, "rows": result["rows"]}
+    env["linked"][target] = {"from": source, "records": result["records"]}
+    for item in result["questions"] + [q for q in unit_questions(env, source, target) if answered(q, env["answers"]) is None]:
         env["questions"][item["id"]] = item
     return result
 
@@ -325,14 +364,14 @@ def execute_plan(plan, spec, env, events):
     outputs, errors = {}, []
     for step in plan["steps"]:
         events.emit("operation_start", operation=step["op"], table=step["table"], intent=step["intent"])
-        if step["op"] == "match_receipts":
-            result = run_match(env, step["table"], step["name"], step["policy"])
-            events.emit("receipt_match", matched=sum(d["record"] is not None for d in result["deposits"]),
-                        deposits=len(result["deposits"]), questions=len(result["questions"]))
+        if step["op"] == "link_rows":
+            result = run_link(env, step["table"], step["text"], step["to"], step["name"], step["policy"])
+            events.emit("linked", rows=len(result["rows"]), linked=sum(r is not None for r in result["rows"].values()),
+                        questions=len(result["questions"]))
         else:
             lines = step.get("lines", 1)
             rows = []
-            ctxs = contexts(env, step.get("for_each", step["table"]), step.get("only_received", False), lines)
+            ctxs = contexts(env, step.get("for_each", step["table"]), step.get("only_linked", False), lines)
             for ctx in ctxs:
                 values, problems = emit(step["columns"], ctx)
                 rows.append(values)
@@ -356,7 +395,7 @@ def learn_checks(key, columns, target, lines):
     """Conventions every target row of an output table follows, to be enforced on every future run.
 
     Generic kinds only: blank/required per line, one value per line, equal across an entry's lines and
-    row/entry/line counters. The builder adds totals that tie to the receipts, template constants and
+    row/entry/line counters. The builder adds totals that tie to linked rows, template constants and
     relations (lookups, arithmetic) found in the target.
     """
     checks, n = [], len(target)
@@ -386,25 +425,35 @@ def learn_checks(key, columns, target, lines):
     return checks
 
 
-def receipts_total(env):
-    return sum((number(d["amount"]) for d in env.get("deposits", []) if d["record"] is not None), Decimal(0))
+def link_totals(env):
+    """Per linked table and numeric column: the total over the rows that were linked."""
+    totals = {}
+    for source, link in env["links"].items():
+        rows = [env["tables"][source]["records"][i] for i, record in link["rows"].items() if record is not None]
+        for name in env["tables"][source]["columns"]:
+            values = [r["values"].get(name) for r in rows]
+            if any(kind(v) == "number" for v in values) and all(kind(v) in (None, "number") for v in values):
+                totals[f"{source}.{name}"] = sum((number(v) for v in values if kind(v)), Decimal(0))
+    return totals
 
 
-def total_checks(key, columns, target, lines, total):
+def total_checks(key, columns, target, lines, totals):
     checks = []
-    if not total:
-        return checks
     for column in columns:
         for line in range(1, lines + 1):
             part = [row.get(column) for row in target][line - 1::lines]
-            if all(kind(v) in (None, "number") for v in part) and sum(number(v) for v in part if v is not None) == total:
-                checks.append({"table": key, "kind": "total", "column": column, "line": line})
+            if not all(kind(v) in (None, "number") for v in part):
+                continue
+            got = sum((number(v) for v in part if kind(v)), Decimal(0))
+            source = next((ref for ref, total in totals.items() if total and total == got), None)
+            if source:
+                checks.append({"table": key, "kind": "total", "column": column, "line": line, "of": source})
     return checks
 
 
 def check_outputs(checks, outputs, env):
     """Every learned convention, re-checked on this run's rows. Returns plain-language failures."""
-    failures, total = [], receipts_total(env)
+    failures, totals = [], link_totals(env)
     for check in checks:
         output = outputs.get(check["table"])
         if output is None:
@@ -432,9 +481,9 @@ def check_outputs(checks, outputs, env):
             if any(kind(v) != "number" or number(v) != expected(i) for i, v in enumerate(values)):
                 problem = f"{name} is not the {kind_.replace('_', ' ')} 1, 2, 3... the example uses"
         elif kind_ == "total":
-            got = sum((number(v) for v in part if kind(v) == "number"), Decimal(0))
+            got, total = sum((number(v) for v in part if kind(v) == "number"), Decimal(0)), totals.get(check["of"])
             if got != total:
-                problem = f"{name} totals {got}, but the matched receipts total {total}"
+                problem = f"{name} totals {got}, but the linked {check['of']} total {total}"
         elif kind_ == "expression":
             for i in indexes:
                 ctx = {**output["contexts"][i], "out": lambda h, row=rows[i]: row.get(h)}
@@ -452,20 +501,9 @@ def check_outputs(checks, outputs, env):
 
 # --- run -------------------------------------------------------------------------------------------
 
-def statement_with_answers(bank, answers):
-    statement = read_statement(bank)
-    open_questions = []
-    for item in statement["questions"]:
-        reply = answered(item, answers)
-        if item["code"] == "statement_currency" and reply:
-            statement["currency"] = reply
-        else:
-            open_questions.append(item)
-    return statement, open_questions
-
-
-def run_workflow(path, workbook, bank, directory, saved=None, answers=None):
-    """Phase 2: execute a saved workflow on current sources. No target, transcript or model."""
+def run_workflow(path, workbook, sources, directory, saved=None, answers=None):
+    """Phase 2: execute a saved workflow on the input workbook plus any other source files (workbooks, PDFs).
+    No target, transcript or model."""
     saved = saved if saved is not None else json.loads(Path(path).read_text())
     if not isinstance(saved, dict) or saved.get("schema_version") != 3:
         raise ValueError("Expected a version-3 workflow produced by `ylookup build`.")
@@ -475,15 +513,16 @@ def run_workflow(path, workbook, bank, directory, saved=None, answers=None):
     events.emit("run_start", phase="run", workflow=str(path), workflow_version=saved.get("workflow_version"))
     base = {"run_dir": str(directory)}
     try:
-        bound, problems = bind_tables(saved, find_tables(sheet_rows(workbook)), answers)
+        found, source_issues = read_sources(workbook, sources)
+        bound, problems = bind_tables(saved, found, answers)
         layout = {key: {"sheet": t["sheet"], "headers": list(t["headers"].values()),
                         "columns": {name: t["headers"][c] for name, c in t["columns"].items()}} for key, t in bound.items()}
         base.update(binding_changes=binding_changes(saved, bound), bindings=layout)
         if problems:
             return stop(events, directory, {**base, "status": "needs_input", "questions": problems,
                                             "reason": "Some workflow tables or columns are not in this input."})
-        statement, open_questions = statement_with_answers(bank, answers)
-        env = environment(saved, bound, statement, answers)
+        open_questions = [q for q in source_issues if answered(q, answers) is None]
+        env = environment(saved, bound, answers)
         outputs, errors = execute_plan(saved["plan"], saved, env, events)
         questions = open_questions + list(env["questions"].values())
         if questions:

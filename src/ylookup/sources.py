@@ -5,6 +5,7 @@ tables and columns matter is learned by the builder and stored in the workflow.
 """
 
 from datetime import date, datetime
+from pathlib import Path
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import re
 import unicodedata
@@ -200,7 +201,7 @@ def rekey(table, columns):
     return {"sheet": table["sheet"], "row": table["row"], "columns": columns, "rows": table["rows"],
             "units": {label: table["units"].get(table["headers"][c]) for label, c in columns.items()},
             "orphans": table["orphans"], "post": table["post"], "headers": table["headers"],
-            "records": keyed(table["records"]), "all": keyed(table["all"])}
+            "records": keyed(table["records"]), "all": keyed(table["all"]), "file": table.get("file")}
 
 
 def table_score(want, table):
@@ -308,87 +309,124 @@ def binding_changes(spec, bound):
     return changes
 
 
-def parse_statement(pages):
-    transactions, issues, currencies = [], [], set()
-    for page_number, text in pages:
-        currencies.update(re.findall(r"\bCurrency\s*:\s*([A-Z]{3})\b", text))
-        positions, current = None, None
-        for line_number, line in enumerate(text.splitlines(), 1):
-            where = f"page {page_number} line {line_number}"
-            labels = {name: re.search(r"\b" + name + r"\b", line, re.I)
-                      for name in ["date", "description", "withdrawal", "deposit", "balance"]}
-            if all(labels.values()):
-                positions = {k: (v.start() + v.end()) / 2 for k, v in labels.items()}
-                if list(positions.values()) != sorted(positions.values()):
-                    issues.append(question("bank_layout", "Provide a supported ordered transaction table.", f"page {page_number}"))
-                    positions = None
-                current = None
-                continue
-            if positions is None:
-                continue
-            date_match = re.match(r"^\s*(\d{1,2} [A-Za-z]{3} \d{4})\b", line)
-            if date_match:
-                current = None
-                try:
-                    when = datetime.strptime(date_match.group(1), "%d %b %Y").date().isoformat()
-                except ValueError:
-                    issues.append(question("receipt_date", "Resolve the transaction date.", where))
-                    continue
-                boundary = (positions["description"] + positions["withdrawal"]) / 2
-                amounts = {key: [] for key in ["withdrawal", "deposit", "balance"]}
-                for match in re.finditer(r"(?<![\w.])-?\d[\d,]*\.\d{2}(?![\w.])", line):
-                    centre = (match.start() + match.end()) / 2
-                    if centre >= boundary:
-                        nearest = min(amounts, key=lambda key: abs(positions[key] - centre))
-                        amounts[nearest].append(match.group())
-                if any(len(values) > 1 for values in amounts.values()) or len(amounts["balance"]) != 1 or sum(bool(amounts[k]) for k in ["withdrawal", "deposit"]) != 1:
-                    issues.append(question("receipt_amount", "Resolve deposit/withdrawal/balance columns; no amount will be guessed.", where))
-                    continue
-                kind_ = "deposit" if amounts["deposit"] else "withdrawal"
-                amount = money(amounts[kind_][0].replace(",", ""))
-                if number(amount) < 0:
-                    issues.append(question("receipt_sign", "Resolve a negative transaction amount.", where))
-                    continue
-                current = {"date": when, "kind": kind_, "amount": amount,
-                           "balance": money(amounts["balance"][0].replace(",", "")),
-                           "description": line[date_match.end():int(boundary)].strip(),
-                           "source": {"page": page_number, "line": line_number}}
-                transactions.append(current)
-            elif line.strip():
-                boundary = (positions["description"] + positions["withdrawal"]) / 2
-                if re.search(r"(?<![\w.])-?\d[\d,]*\.\d{2}(?![\w.])", line[int(boundary):]):
-                    issues.append(question("receipt_date", "Resolve an undated or unsupported transaction row; monetary values will not be attached to another receipt.", where))
-                    current = None
-                    continue
-                if re.search(r"Thank you for|Generated on", line, re.I):
-                    current = None
-                elif current:
-                    current["description"] += " " + line.strip()
-        if positions is None:
-            issues.append(question("bank_layout", "Provide a readable text-layer statement with Date/Description/Withdrawal/Deposit/Balance headers.", f"page {page_number}"))
-    for transaction in transactions:
-        reference_currencies = set(re.findall(r"\b([A-Z]{3})\|\d+(?:\.\d+)?\|", transaction["description"]))
-        if reference_currencies and (len(currencies) != 1 or reference_currencies != currencies):
-            issues.append(question("receipt_currency", "Resolve conflicting currency evidence in the transaction reference.",
-                                   f"{transaction['date']} {transaction['amount']}", reference_currencies=sorted(reference_currencies)))
-    if len(currencies) != 1:
-        issues.append(question("statement_currency", "Which currency is this statement in?", "statement",
-                               options=sorted(currencies) or None))
-    if not transactions:
-        issues.append(question("bank_records", "No supported transaction records were extracted; confirm whether this is an empty or unsupported statement.", "statement"))
-    return {"transactions": transactions, "currency": next(iter(currencies)) if len(currencies) == 1 else None,
-            "questions": issues}
+DATE_FORMATS = ["%d %b %Y", "%d %B %Y", "%Y-%m-%d", "%d/%m/%Y", "%d.%m.%Y", "%b %d, %Y"]
+DATE = re.compile(r"^\s*(\d{1,2} [A-Za-z]{3,9} \d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}[/.]\d{1,2}[/.]\d{4}|[A-Za-z]{3} \d{1,2}, \d{4})(?=\s|$)")
+MONEY = re.compile(r"^-?\d[\d,]*\.\d{2}$")
+UNIT = re.compile(r"\b(?:Currency|CCY)\s*:\s*([A-Z]{3})\b")
 
 
-def read_statement(path):
-    # ponytail: aligned text-layer tables only; add an OCR/layout adapter for other statements.
-    reader = PdfReader(path)
-    return parse_statement([(index, page.extract_text(extraction_mode="layout"))
-                            for index, page in enumerate(reader.pages, 1)])
+def parse_date(text):
+    for pattern in DATE_FORMATS:
+        try:
+            return datetime.strptime(text.strip(), pattern).date()
+        except ValueError:
+            continue
+    return None
+
+
+def cells(line):
+    """Text pieces separated by two or more spaces, with their start and centre positions."""
+    return [(m.group(), m.start(), (m.start() + m.end()) / 2) for m in re.finditer(r"\S+(?: \S+)*", line)]
+
+
+def pdf_pages(path):
+    # ponytail: text-layer PDFs only; add OCR for scanned statements.
+    return [page.extract_text(extraction_mode="layout") for page in PdfReader(path).pages]
+
+
+def pdf_tables(pages, name):
+    """Tables in PDF text: a header line of labels, then rows that start with a date.
+
+    Nothing is assumed about the columns. After the date, text belongs to the next column; amounts
+    go to the column whose label they sit under; wrapped lines extend the row's text until a blank
+    line ends the table. Returns (tables, questions).
+    """
+    tables, issues, units = {}, [], set()
+    for page_number, text in enumerate(pages, 1):
+        units.update(UNIT.findall(text))
+        lines = text.splitlines()
+        header, current = None, None
+        for number, line in enumerate(lines, 1):
+            where = f"{name} page {page_number} line {number}"
+            following = next((l for l in lines[number:] if l.strip()), "")
+            labels = cells(line)
+            if len(labels) >= 3 and all(re.fullmatch(r"[A-Za-z][A-Za-z ()/&.'-]*", c) for c, *_ in labels) and DATE.match(following):
+                header, current = labels, None
+                table = tables.setdefault(tuple(c for c, *_ in labels), [])
+                continue
+            if header is None:
+                continue
+            if not line.strip():
+                if current is not None:
+                    header, current = None, None  # a blank line after rows ends the table
+                continue
+            match = DATE.match(line)
+            values = [None] * len(header)
+            pieces = cells(line[match.end():] if match else line)
+            offset = match.end() if match else 0
+            if match:
+                when = parse_date(match.group(1))
+                if when is None:
+                    issues.append(question("source_date", f"Unreadable date '{match.group(1)}' in {where}.", where))
+                    current = None
+                    continue
+                date_column = min(range(len(header)), key=lambda i: abs(header[i][2] - (match.start(1) + match.end(1)) / 2))
+                values[date_column] = when
+                text_column = min(date_column + 1, len(header) - 1)
+                for piece, start, centre in pieces:
+                    if MONEY.match(piece):
+                        column = min(range(len(header)), key=lambda i: abs(header[i][2] - (centre + offset)))
+                        if values[column] is not None:
+                            issues.append(question("source_layout", f"Two values fall under '{header[column][0]}' in {where}; "
+                                                   "nothing will be guessed.", where))
+                        values[column] = Decimal(piece.replace(",", ""))
+                    else:
+                        values[text_column] = piece if values[text_column] is None else f"{values[text_column]} {piece}"
+                current = {"row": page_number * 1000 + number, "cells": values, "formulas": [None] * len(header),
+                           "text": text_column, "where": where}
+                table.append(current)
+            elif current is not None:
+                if any(MONEY.match(piece) for piece, *_ in pieces):
+                    issues.append(question("source_row", f"A row with amounts but no date in {where}; it will not be "
+                                           "attached to another row.", where))
+                    header, current = None, None
+                    continue
+                column = current["text"]
+                current["cells"][column] = " ".join(filter(None, [current["cells"][column], line.strip()]))
+    found = []
+    for labels, rows in tables.items():
+        if not rows:
+            continue
+        headers = dict(enumerate(label(l) for l in labels))
+        numeric = {headers[i] for i in headers if any(kind(at(r["cells"], i)) == "number" for r in rows)}
+        found.append({"sheet": name, "row": 0, "headers": headers, "key": None, "width": len(headers), "records": rows,
+                      "all": rows, "orphans": [], "post": [], "rows": len(rows),
+                      "units": {h: next(iter(units)) for h in numeric} if len(units) == 1 else {}})
+    if len(units) > 1:
+        issues.append(question("source_currency", f"{name} names several currencies {sorted(units)}; which one applies?",
+                               name, options=sorted(units)))
+    if not found:
+        issues.append(question("source_tables", f"No table with a header row and dated rows was found in {name}.", name))
+    return found, issues
+
+
+def read_sources(workbook, others=()):
+    """Every table of the input workbook and of any other file (workbooks or PDFs), tagged with its file."""
+    found = [{**t, "file": str(workbook)} for t in find_tables(sheet_rows(workbook))]
+    issues = []
+    for path in others or ():
+        path = Path(path)
+        if path.suffix.lower() == ".pdf":
+            tables, problems = pdf_tables(pdf_pages(path), path.stem)
+            issues += problems
+        else:
+            tables = find_tables(sheet_rows(path))
+        found += [{**t, "file": str(path)} for t in tables]
+    return found, issues
 
 
 def match_names(description, names, policy="full_or_unique_prefix"):
-    """Indexes of names found in a bank reference: full names, or first name plus a surname prefix."""
+    """Indexes of names found in a text: full names, or first name plus a surname prefix."""
     text = normalise(description)
     full = [i for i, name in names.items() if re.search(r"\b" + re.escape(normalise(name)) + r"\b", text)]
     if full or policy == "full_name_only":
@@ -403,73 +441,37 @@ def match_names(description, names, policy="full_or_unique_prefix"):
     return partial, "first_name_and_surname_prefix"
 
 
-LEAVE = "Leave it unmatched for follow-up"
+LEAVE = "Leave it unlinked for follow-up"
 
 
-def match_receipts(statement, table, name, policy, answers):
-    """Assign each deposit to one record by its name column. Doubt becomes a question, never a guess.
+def link_rows(source, text, target, name, policy, answers, source_key="rows", target_key="records"):
+    """Link each row of one table to one record of another whose name its text contains.
 
-    Returns per-record receipts {record index: {amount, date, description}}, the kept deposits with
-    their record (or None when a person chose to leave one unmatched), and the open questions.
+    Doubt becomes a question with the candidate names (or leaving the row unlinked), never a guess.
+    Returns {"rows": {row index: record index or None}, "records": {record index: [row indexes]}, "questions"}.
     """
-    names = {i: r["values"][name] for i, r in enumerate(table["records"])
+    names = {i: r["values"][name] for i, r in enumerate(target["records"])
              if isinstance(r["values"].get(name), str) and normalise(r["values"][name])}
-    display = {i: n if list(names.values()).count(n) == 1 else f"{n} (row {table['records'][i]['row']})"
+    display = {i: n if list(names.values()).count(n) == 1 else f"{n} (row {target['records'][i]['row']})"
                for i, n in names.items()}
-    deposits, issues, seen = [], [], set()
-    for t in statement["transactions"]:
-        key = f"{t['date']} {t['kind']} {t['amount']}"
-        signature = (t["date"], normalise(t["description"]), t["kind"], t["amount"])
-        if signature in seen:
-            item = question("duplicate_transaction", f"The statement repeats a {t['kind']} of {t['amount']} on {t['date']}. Count it twice?",
-                            key, options=["Count it twice", "Count it once"], source=t["source"])
-            if answered(item, answers) is None:
-                issues.append(item)
-            if answered(item, answers) != "Count it twice":
-                continue
-        seen.add(signature)
-        if t["kind"] != "deposit":
-            item = question("withdrawal", f"The statement has a withdrawal of {t['amount']} on {t['date']}. How should it be treated?",
-                            key, options=["Leave it out of this reconciliation", "Stop for review"],
-                            stop="Stop for review", source=t["source"])
-            if answered(item, answers) is None:
-                issues.append(item)
-            continue
-        found, method = match_names(t["description"], names, policy)
+    rows, records, issues = {}, {}, []
+    for index, row in enumerate(source["records"]):
+        value = row["values"].get(text)
+        found, method = match_names(value, names, policy) if isinstance(value, str) else ([], "full_name")
         record = found[0] if len(found) == 1 else None
         if record is None:
-            item = question("receipt_match", f"Which {name} paid {t['amount']} on {t['date']}? "
-                            f"{'No' if not found else len(found)} {'name matches' if not found else 'names match'} the bank reference.",
-                            key, options=[display[i] for i in (found or names)] + [LEAVE],
-                            source=t["source"], method=method)
+            summary = ", ".join(f"{k} {canon(v)}" for k, v in row["values"].items() if k != text and kind(v))[:120]
+            item = question("link", f"Which {target_key} does this {source_key} row belong to ({summary})? "
+                            f"{'No' if not found else len(found)} {name} {'value matches' if not found else 'values match'} its {text}.",
+                            summary, options=[display[i] for i in (found or names)] + [LEAVE], row=row["row"], method=method)
             reply = answered(item, answers)
             if reply is None:
                 issues.append(item)
-                continue
-            if reply != LEAVE:
+            elif reply != LEAVE:
                 record = next((i for i, n in display.items() if n == reply), None)
                 if record is None:
                     issues.append({**item, "question": item["question"] + f" (the answer '{reply}' is not one of the options)"})
-                    continue
-        deposits.append({**t, "record": record})
-    receipts = {}
-    for t in deposits:
-        if t["record"] is None:
-            continue
-        entry = receipts.setdefault(t["record"], {"amount": Decimal(0), "dates": [], "description": []})
-        entry["amount"] += number(t["amount"])
-        entry["dates"].append(t["date"])
-        entry["description"].append(t["description"])
-    for index, entry in receipts.items():
-        dates = sorted(set(entry.pop("dates")))
-        entry["description"] = " ".join(entry["description"])
-        if len(dates) > 1:
-            item = question("receipt_date", f"{display[index]} paid on {len(dates)} dates. Which date should the entry use?",
-                            f"{display[index]} {' '.join(dates)}", options=dates)
-            reply = answered(item, answers)
-            if reply not in dates:
-                issues.append(item)
-                reply = dates[0]
-            dates = [reply]
-        entry["date"] = date.fromisoformat(dates[0])
-    return {"receipts": receipts, "deposits": deposits, "questions": issues}
+        rows[index] = record
+        if record is not None:
+            records.setdefault(record, []).append(index)
+    return {"rows": rows, "records": records, "questions": issues}

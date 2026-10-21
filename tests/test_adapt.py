@@ -8,7 +8,7 @@ from openpyxl import load_workbook
 
 from ylookup.adapt import adapt_workflow
 from ylookup.planner import run_workflow
-from fixtures import FakeModel, PRIVATE, built, edit, parsed
+from fixtures import FakeModel, PRIVATE, built, edit, pages
 
 
 def reply(mappings, question=None):
@@ -26,8 +26,8 @@ class AdaptTest(unittest.TestCase):
     def adapt(self, replies, answers=None, ask=None):
         self.round += 1
         client = FakeModel(replies)
-        with patch("ylookup.planner.read_statement", return_value=parsed()):
-            result = adapt_workflow(self.workflow, self.source, self.bank, self.context, client,
+        with patch("ylookup.sources.pdf_pages", return_value=pages()):
+            result = adapt_workflow(self.workflow, self.source, [self.bank], self.context, client,
                                     self.folder / f"adapt-{self.round}", answers, ask)
         return result, client
 
@@ -45,8 +45,8 @@ class AdaptTest(unittest.TestCase):
         self.assertIn("feeds Import.Entity", request)
         for private in PRIVATE:
             self.assertNotIn(private, request)
-        with patch("ylookup.planner.read_statement", return_value=parsed()):
-            again = run_workflow(result["workflow"], self.source, self.bank, self.folder / "v2")
+        with patch("ylookup.sources.pdf_pages", return_value=pages()):
+            again = run_workflow(result["workflow"], self.source, [self.bank], self.folder / "v2")
         self.assertEqual(again["status"], "success")
 
     def test_renamed_chart_headers_keep_the_right_table_and_a_renamed_tab_too_asks_which_table(self):
@@ -98,6 +98,18 @@ class AdaptTest(unittest.TestCase):
         self.assertEqual(prompts[0]["options"], ["Called", "Notes"])
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["mapping"]["Roster.Amount Called"]["decided_by"], "person")
+
+    def test_data_questions_during_adapt_are_asked_and_the_run_finishes(self):
+        edit(self.source, ("Roster", "B4", None))
+        prompts = []
+
+        def ask(items):
+            prompts.extend(items)
+            return {items[0]["id"]: {"answer": "Morgan Vale"}}
+
+        result, client = self.adapt([], ask=ask)
+        self.assertEqual([q["code"] for q in prompts], ["missing_value"])
+        self.assertEqual((result["status"], result["adapted"], client.messages), ("success", False, []))
 
     def test_an_input_that_fits_needs_no_model_and_a_removed_column_stops(self):
         book = load_workbook(self.source)

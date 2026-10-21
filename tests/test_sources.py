@@ -7,8 +7,8 @@ import unittest
 
 from openpyxl import Workbook
 
-from ylookup.sources import (LEAVE, bind_tables, equivalent, find_tables, match_names, match_receipts, parse_statement,
-                             rekey, sheet_rows)
+from ylookup.sources import (LEAVE, bind_tables, equivalent, find_tables, link_rows, match_names, pdf_tables, rekey,
+                             sheet_rows)
 from fixtures import statement
 
 
@@ -89,32 +89,41 @@ class TablesTest(unittest.TestCase):
         self.assertTrue(equivalent(long, long.replace("|", " ").replace("RDO9", "RD O9")))
 
 
-class StatementTest(unittest.TestCase):
-    def test_deposit_is_not_running_balance_and_wrapped_description_is_kept(self):
-        result = parse_statement([(1, statement())])
-        self.assertEqual(result["questions"], [])
-        receipt = result["transactions"][0]
-        self.assertEqual((receipt["amount"], receipt["balance"], receipt["date"]), ("95.00", "900.00", "2026-02-24"))
-        self.assertEqual(receipt["description"], "REF TAYLOR REE MORE WRAPPED REFERENCE")
+def pdf_table(*texts):
+    tables, questions = pdf_tables(list(texts), "bank")
+    return (tables[0] if tables else None), questions
 
-    def test_unsupported_layout_missing_amount_and_undated_rows_ask(self):
-        self.assertTrue(any(q["code"] == "bank_layout" for q in parse_statement([(1, "scanned image")])["questions"]))
-        missing = parse_statement([(1, statement().replace("95.00", "     "))])
-        self.assertEqual(missing["transactions"], [])
+
+class PdfTableTest(unittest.TestCase):
+    def test_columns_come_from_the_header_and_wrapped_text_stays_with_its_row(self):
+        table, questions = pdf_table(statement())
+        self.assertEqual(questions, [])
+        self.assertEqual(list(table["headers"].values()), ["Date", "Description", "Withdrawal", "Deposit", "Balance"])
+        self.assertEqual(table["records"][0]["cells"], [date(2026, 2, 24), "REF TAYLOR REE MORE WRAPPED REFERENCE", None,
+                                                         Decimal("95.00"), Decimal("900.00")])
+        self.assertEqual(table["units"], {"Deposit": "USD", "Balance": "USD"})
+
+    def test_any_column_names_and_date_format_work(self):
+        text = (f"{'Booked':<12}{'Payer reference':<40}{'Amount in':>12}{'Running total':>16}\n"
+                f"{'2026-03-01':<12}{'MORGAN VALE INV 7':<40}{'50.00':>12}{'950.00':>16}\n")
+        table, _ = pdf_table(text)
+        self.assertEqual(list(table["headers"].values()), ["Booked", "Payer reference", "Amount in", "Running total"])
+        self.assertEqual(table["records"][0]["cells"], [date(2026, 3, 1), "MORGAN VALE INV 7", Decimal("50.00"), Decimal("950.00")])
+
+    def test_unreadable_layouts_and_undated_amounts_ask(self):
+        self.assertEqual(pdf_table("scanned image")[1][0]["code"], "source_tables")
         undated = statement().splitlines()[2].replace("24 Feb 2026", "           ")
-        result = parse_statement([(1, statement().replace("   MORE WRAPPED REFERENCE", undated))])
-        self.assertEqual(len(result["transactions"]), 1)
-        self.assertTrue(any(q["code"] == "receipt_date" for q in result["questions"]))
-        conflict = parse_statement([(1, statement().replace("   MORE WRAPPED REFERENCE", "   EUR|95.00|1.00"))])
-        self.assertTrue(any(q["code"] == "receipt_currency" for q in conflict["questions"]))
+        table, questions = pdf_table(statement().replace("   MORE WRAPPED REFERENCE", undated))
+        self.assertEqual(len(table["records"]), 1)
+        self.assertEqual([q["code"] for q in questions], ["source_row"])
 
 
-class MatchTest(unittest.TestCase):
-    def table(self, *names):
-        found = {"sheet": "R", "row": 1, "headers": {0: "Name"}, "key": "Name", "units": {}, "orphans": [], "post": [], "rows": len(names),
-                 "records": [{"row": i + 2, "cells": [n], "formulas": [None]} for i, n in enumerate(names)],
+class LinkTest(unittest.TestCase):
+    def table(self, column, *values):
+        found = {"sheet": "T", "row": 1, "headers": {0: column}, "key": None, "units": {}, "orphans": [], "post": [],
+                 "rows": len(values), "records": [{"row": i + 2, "cells": [v], "formulas": [None]} for i, v in enumerate(values)],
                  "all": []}
-        return rekey(found, {"Name": 0})
+        return rekey(found, {column: 0})
 
     def test_names_match_in_full_or_by_first_name_and_surname_prefix(self):
         names = {0: "Taylor Reed", 1: "Taylor Reeves"}
@@ -123,30 +132,15 @@ class MatchTest(unittest.TestCase):
         self.assertEqual(match_names("REF TAYLOR REE", names, "full_name_only"), ([], "full_name"))
 
     def test_doubt_becomes_a_question_and_an_answer_settles_it(self):
-        table = self.table("Taylor Reed", "Taylor Reeves")
-        result = match_receipts(parse_statement([(1, statement())]), table, "Name", "full_or_unique_prefix", {})
+        rows, people = self.table("Text", "REF TAYLOR REE", "MORGAN VALE"), self.table("Name", "Taylor Reed", "Taylor Reeves", "Morgan Vale")
+        result = link_rows(rows, "Text", people, "Name", "full_or_unique_prefix", {})
+        self.assertEqual(result["rows"], {0: None, 1: 2})
         item = result["questions"][0]
-        self.assertEqual((item["code"], item["options"]), ("receipt_match", ["Taylor Reed", "Taylor Reeves", LEAVE]))
-        settled = match_receipts(parse_statement([(1, statement())]), table, "Name", "full_or_unique_prefix", {item["id"]: "Taylor Reeves"})
-        self.assertEqual(settled["questions"], [])
-        self.assertEqual(settled["receipts"], {1: {"amount": Decimal("95.00"), "description": "REF TAYLOR REE MORE WRAPPED REFERENCE",
-                                                   "date": date(2026, 2, 24)}})
-        left = match_receipts(parse_statement([(1, statement())]), table, "Name", "full_or_unique_prefix", {item["id"]: LEAVE})
-        self.assertEqual((left["receipts"], left["deposits"][0]["record"]), ({}, None))
-
-    def test_withdrawals_duplicates_and_repeat_payers_are_questions(self):
-        table = self.table("Taylor Reed", "Morgan Vale")
-        cases = {"withdrawal": [(1, statement(kind="withdrawal"))],
-                 "duplicate_transaction": [(1, statement()), (2, statement())]}
-        for code, pages in cases.items():
-            self.assertEqual([q["code"] for q in match_receipts(parse_statement(pages), table, "Name", "full_or_unique_prefix", {})["questions"]], [code])
-        later = statement().replace("24 Feb 2026", "25 Feb 2026").replace("REF TAYLOR REE", "SECOND TAYLOR REE")
-        twice = match_receipts(parse_statement([(1, statement()), (2, later)]), table, "Name", "full_or_unique_prefix", {})
-        self.assertEqual(twice["questions"][0]["options"], ["2026-02-24", "2026-02-25"])
-        self.assertEqual(twice["receipts"][0]["amount"], Decimal("190.00"))
-        stop = {"withdrawal:2026-02-24 withdrawal 95.00": "Stop for review"}
-        with self.assertRaisesRegex(ValueError, "Stopped by a recorded answer"):
-            match_receipts(parse_statement([(1, statement(kind="withdrawal"))]), table, "Name", "full_or_unique_prefix", stop)
+        self.assertEqual(item["options"], ["Taylor Reed", "Taylor Reeves", LEAVE])
+        settled = link_rows(rows, "Text", people, "Name", "full_or_unique_prefix", {item["id"]: "Taylor Reeves"})
+        self.assertEqual((settled["rows"], settled["records"], settled["questions"]), ({0: 1, 1: 2}, {1: [0], 2: [1]}, []))
+        left = link_rows(rows, "Text", people, "Name", "full_or_unique_prefix", {item["id"]: LEAVE})
+        self.assertEqual((left["rows"][0], left["questions"]), (None, []))
 
 
 if __name__ == "__main__":

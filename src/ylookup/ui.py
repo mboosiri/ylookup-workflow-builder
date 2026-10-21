@@ -1,246 +1,395 @@
-"""Local Streamlit UI for the three evaluation phases. Same functions as the CLI; no extra logic."""
+"""Local chat UI: upload files, talk to the builder, watch its trace. Same functions as the CLI.
 
+Nothing assumes file names or roles. The builder works out from the content which upload is the
+input, the completed example, a source or a saved workflow; the conversation is the customer's
+description; and every question the builder asks appears in the chat for you to answer.
+"""
+
+from collections import Counter
 import json
 from pathlib import Path
+import queue
+import threading
 import time
 
 import streamlit as st
 
 from ylookup.adapt import PROMPT_VERSION as ADAPT_PROMPT_VERSION, adapt_workflow
-from ylookup.builder import MAX_ATTEMPTS, PROMPT_VERSION, build_workflow
+from ylookup.builder import MAX_ATTEMPTS, PROMPT_VERSION, build_workflow, guess_roles
 from ylookup.events import Events
 from ylookup.model import OpenRouter, settings
-from ylookup.planner import run_workflow
 
 RUNS = Path("runs")
 UPLOADS = Path("data/uploads")
-OTHER = "Other (type below)"
+TYPES = ["xlsx", "xlsm", "pdf", "txt", "md", "json"]
+WELCOME = ("Attach the files of a job: the input workbook, a completed example of the same job, and any other "
+           "sources such as a bank statement PDF. Then tell me, in your own words, how the job is done. "
+           "I work out which file is which, learn the workflow, and ask when something is unclear. "
+           "To use a workflow later, attach it with a new or changed input and say **run**.")
 
 
-def local_files(suffix):
-    found = [p for folder in ["data", "examples", "workflows"] for p in Path(folder).glob("**/*" + suffix)]
-    if suffix == ".json":
-        found = [p for p in found if p.parent.name == "workflows"] + list(RUNS.glob("*/workflow.json"))
-    found = [p for p in found if not p.name.startswith("~$")]
-    return sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
+# --- state ----------------------------------------------------------------------------------------
+
+def state():
+    s = st.session_state
+    if "folder" not in s:
+        s.folder = UPLOADS / time.strftime("chat-%Y%m%d-%H%M%S")
+        s.files, s.description, s.answers, s.job, s.workflow, s.built_from = [], [], {}, None, None, set()
+        s.last_build = None
+        s.messages = [{"role": "assistant", "text": WELCOME}]
+    return s
 
 
-def pick(label, suffix, hint, key):
-    options = local_files(suffix)
-    if not options:
-        st.warning(f"No {suffix} files found. Add one in the sidebar.")
-        return None
-    default = next((i for i, p in enumerate(options) if hint in p.name), 0)
-    return st.selectbox(label, options, index=default, key=key, format_func=str)
+def say(text, **extra):
+    state().messages.append({"role": "assistant", "text": text, **extra})
 
 
-def new_run(kind):
-    return RUNS / f"ui-{kind}-{time.strftime('%Y%m%d-%H%M%S')}"
+def roles():
+    """File roles from content. After a build, the files it learned from keep their roles and any other
+    workbook is a new input to run the workflow on."""
+    s = state()
+    workbook = lambda p: p.suffix.lower() in (".xlsx", ".xlsm")
+    found = guess_roles([p for p in s.files if not s.built_from or p in s.built_from or not workbook(p)])
+    found["new_inputs"] = [p for p in s.files if s.built_from and workbook(p) and p not in s.built_from]
+    if s.workflow:
+        found["workflows"] = [s.workflow] + [w for w in found["workflows"] if w != s.workflow]
+    return found
 
 
-def read_events(run_dir):
-    path = Path(run_dir) / "events.jsonl"
-    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+def run_input():
+    """The workbook to run a workflow on: the newest upload that was not part of its build."""
+    workbooks = [p for p in state().files if p.suffix.lower() in (".xlsx", ".xlsm") and p not in state().built_from]
+    return workbooks[-1] if workbooks else None
 
 
-def status_banner(result):
-    status = result.get("status")
-    text = {"success": "Success", "needs_input": "Stopped: needs your input",
-            "stopped": "Stopped: could not resolve", "budget_exhausted": "Stopped: call budget used up"}.get(status, status)
-    {"success": st.success, "needs_input": st.warning}.get(status, st.error)(text)
+def description():
+    s = state()
+    texts = [p.read_text() for p in s.files if p.suffix.lower() in (".txt", ".md")]
+    return "\n\n".join(texts + s.description).strip()
 
 
-def download(label, path, key):
-    path = Path(path)
-    if path.exists():
-        st.download_button(label, path.read_bytes(), file_name=path.name, key=key)
+def role_of(path, r):
+    return ("a new input for the workflow" if path in r["new_inputs"] else "the input" if path == r["input"]
+            else "the completed example" if path == r["target"]
+            else "a source" if path in r["sources"] else "a saved workflow" if path in r["workflows"]
+            else "the description" if path in r["context"] else "not used")
 
 
-def answer_questions(questions, key):
-    """Any question: pick an option or type an answer. Answers are kept by question id and sent on the next run."""
-    answers = st.session_state.setdefault("answers", {})
-    for item in questions:
-        st.write(f"**{item['question']}**")
-        options = item.get("options") or []
-        choice = st.radio("Answer", options + [OTHER], key=f"{key}-{item['id']}", label_visibility="collapsed") if options else OTHER
-        text = st.text_input("Your answer", key=f"{key}-{item['id']}-text") if choice == OTHER else choice
-        if text:
-            answers[item["id"]] = {"question": item["question"], "answer": text}
-    if questions:
-        st.caption("Answers are kept for this session; run again to use them.")
+def next_step():
+    r, s = roles(), state()
+    if r["workflows"] and run_input() and (not s.built_from or run_input() not in s.built_from):
+        return f"Say **run** to run the workflow on `{run_input().name}`; if its layout changed I adapt the workflow."
+    if r["input"] and r["target"] and (r["input"], r["target"]) != s.last_build:
+        if len(description().split()) < 15:
+            return "Now tell me how the job is done, in your own words (or attach a description), and I will build the workflow."
+        return "I have what I need. Say **build** to learn the workflow, or add more to the description first."
+    if r["workflows"] and run_input():
+        return f"Say **run** to run the workflow on `{run_input().name}`; if its layout changed I adapt the workflow."
+    if r["workflows"]:
+        return "Attach an input workbook to run the workflow on."
+    if r["input"] and not r["target"]:
+        return "Attach a completed example of the same job so I can learn from it, or a saved workflow to run."
+    return "Attach the input workbook and a completed example of the same job."
 
 
-def attempts_table(run_dir):
-    rows = {}
-    for event in read_events(run_dir):
-        attempt = event.get("attempt")
-        if attempt is None:
-            continue
-        row = rows.setdefault(attempt, {"attempt": attempt, "result": "", "differences": None, "detail": ""})
-        if event["event"] == "model_response":
-            row["seconds"] = round(event.get("elapsed_seconds") or 0, 1)
-        elif event["event"] == "validation":
-            row["result"], row["detail"] = "invalid plan", event.get("validation_error", "")[:300]
-        elif event["event"] == "comparison":
-            row["differences"] = len(event["differences"])
-            row["result"] = "pass" if event["status"] == "pass" else row["result"] or "differs from target"
-            if event["differences"]:
-                first = event["differences"][0]
-                row["detail"] = row["detail"] or f"e.g. {first.get('field')}: expected {first.get('expected')}, got {first.get('actual')}"
-    return list(rows.values())
+# --- background jobs ----------------------------------------------------------------------------------
 
+def start(kind, run_dir, work):
+    """Run work(ask) in a thread; ask(questions) waits for the answers given in the chat."""
+    job = {"kind": kind, "run_dir": Path(run_dir), "pending": [], "collected": {}, "inbox": queue.Queue(),
+           "result": None, "error": None}
 
-def show_run_result(result, key):
-    status_banner(result)
-    run_dir = Path(result.get("run_dir") or ".")
-    if result.get("binding_changes"):
-        st.info("Source layout changed since build (resolved by meaning):\n\n- " + "\n- ".join(result["binding_changes"]))
-    if result.get("reason"):
-        st.write(result["reason"])
-    for failure in result.get("check_failures", []):
-        st.write("- " + failure)
-    if result.get("questions"):
-        answer_questions(result["questions"], key)
-    if result["status"] == "success" and result.get("output"):
-        st.caption(f"Rows written: {result['rows']} to `{result['output']}`")
-        outputs = json.loads((run_dir / "outputs.json").read_text())
-        for table, rows in outputs.items():
-            with st.expander(f"{table} ({len(rows)} rows)", expanded=len(rows) == max(map(len, outputs.values()))):
-                st.dataframe(rows, width="stretch")
-        download("Download output.xlsx", result["output"], key + "-dl")
-    if result.get("run_dir"):
-        st.caption(f"Run folder: `{run_dir}`")
+    def ask(items):
+        job["collected"], job["pending"] = {}, list(items)
+        answers = job["inbox"].get()
+        job["pending"] = []
+        return answers
 
-
-def run_panel(key, input_hint):
-    workflow = pick("Saved workflow", ".json", "reconciliation", key + "-wf")
-    workbook = pick("Input workbook (.xlsx)", ".xlsx", input_hint, key + "-in")
-    bank = pick("Bank statement (.pdf)", ".pdf", "", key + "-bank")
-    if st.button("Run workflow", type="primary", key=key + "-go", disabled=not (workflow and workbook and bank)):
+    def target():
         try:
-            st.session_state[key] = run_workflow(workflow, workbook, bank, new_run(key), answers=st.session_state.answers)
-        except Exception as error:
-            st.error(f"Run failed: {error}")
-    if key in st.session_state:
-        show_run_result(st.session_state[key], key)
+            job["result"] = work(ask)
+        except Exception as error:  # shown in the chat
+            job["error"] = str(error)
+
+    job["thread"] = threading.Thread(target=target, daemon=True)
+    job["thread"].start()
+    state().job = job
 
 
-st.set_page_config(page_title="Ylookup workflow builder", layout="wide")
+def answer(job, item, text):
+    job["collected"][item["id"]] = {"question": item["question"], "answer": text}
+    state().answers[item["id"]] = job["collected"][item["id"]]
+    state().messages += [{"role": "assistant", "text": item["question"]}, {"role": "user", "text": text}]
+    if all(q["id"] in job["collected"] for q in job["pending"]):
+        job["inbox"].put(dict(job["collected"]))
+
+
+def client(prompt_version, tokens):
+    key, model = settings()
+    return OpenRouter(key, model, prompt_version, tokens), key
+
+
+def build():
+    s, r = state(), roles()
+    model_client, key = client(PROMPT_VERSION, 8000)
+    run_dir = RUNS / time.strftime("chat-build-%Y%m%d-%H%M%S")
+    events = Events(run_dir, (key,))
+    (run_dir / "context.txt").write_text(description())
+    s.last_build = (r["input"], r["target"])
+    files = (r["input"], r["target"], *r["sources"])
+    say(f"Learning from `{r['input'].name}` → `{r['target'].name}`"
+        + (f" with {', '.join(f'`{p.name}`' for p in r['sources'])}" if r["sources"] else "") + ".")
+    answers = dict(s.answers)  # threads cannot read session state
+    start("build", run_dir, lambda ask: {**build_workflow(r["input"], r["target"], r["sources"], run_dir / "context.txt",
+                                                          answers, model_client, events, MAX_ATTEMPTS, ask),
+                                         "files": [str(p) for p in files]})
+
+
+def run():
+    s, r = state(), roles()
+    workbook = run_input()
+    sources = [p for p in r["sources"] if p != workbook and p.suffix.lower() == ".pdf"] or \
+              [p for p in r["sources"] if p != workbook and p not in s.built_from]
+    run_dir = RUNS / time.strftime("chat-run-%Y%m%d-%H%M%S")
+    s.folder.mkdir(parents=True, exist_ok=True)
+    context = s.folder / f"context-{time.strftime('%H%M%S')}.txt"
+    context.write_text(description())
+    say(f"Running `{Path(r['workflows'][0]).name}` on `{workbook.name}`"
+        + (f" with {', '.join(f'`{p.name}`' for p in sources)}" if sources else "") + ".")
+    try:
+        model_client, _ = client(ADAPT_PROMPT_VERSION, 1500)
+    except ValueError:
+        model_client = None  # a run needs no model; only a renamed column does
+    answers, workflow = dict(s.answers), r["workflows"][0]  # threads cannot read session state
+    start("run", run_dir, lambda ask: adapt_workflow(workflow, workbook, sources, context, model_client, run_dir, answers, ask))
+
+
+# --- trace ----------------------------------------------------------------------------------------------
+
+def events(run_dir):
+    found = []
+    for path in sorted(Path(run_dir).rglob("events.jsonl")):
+        found += [json.loads(line) for line in path.read_text().splitlines()]
+    return found
+
+
+def describe(event):
+    name = event["event"]
+    if name == "run_start":
+        return {"build": "Reading every file and comparing the input with the completed example",
+                "run": "Running the saved workflow on this input (no model)"}.get(event.get("phase"))
+    if name == "learned":
+        outputs = "; ".join(f"`{k}` {'gets new rows' if v['op'] == 'append_rows' else 'gets ' + str(len(v['columns'])) + ' columns filled'}"
+                            for k, v in event["outputs"].items())
+        return f"Learned what the job produces: {outputs}. {event['checks']} conventions to check on every run"
+    if name == "model_request":
+        return f"Model call {event['attempt']}: composing the plan from that evidence"
+    if name == "candidate":
+        return "Plan: " + " → ".join(f"{s['op']} `{s['table']}`" for s in event["plan"]["steps"])
+    if name == "validation":
+        return f"Code rejected the plan: {event.get('validation_error', '')[:200]}"
+    if name == "comparison":
+        if event["status"] == "pass":
+            return "Output matches the completed example ✓"
+        wrong = Counter(d.get("column") or d.get("check") for d in event["differences"])
+        return f"{len(event['differences'])} cells differ from the example: " + ", ".join(f"{c} ({n})" for c, n in wrong.most_common(5))
+    if name == "locked_fields":
+        return f"Kept {len(event['restored'])} columns that already matched"
+    if name == "adopted_candidates":
+        return "Code used the only verified expression for " + ", ".join(event["columns"])
+    if name == "inquiry" and event.get("attempt"):
+        item = event.get("question")
+        return "The model asked: " + (item["question"] if isinstance(item, dict) else str(item))[:200]
+    if name == "linked":
+        return f"Linked {event['linked']} of {event['rows']} rows"
+    if name == "operation_start":
+        return f"{event['operation']} `{event['table']}`"
+    if name == "model_error":
+        return "A model call failed; " + ("retrying" if event.get("retrying") else "giving up")
+    if name == "run_end":
+        status = event.get("status")
+        return {"success": "Done ✓", "needs_input": "Needs an answer", "budget_exhausted": "Out of model calls",
+                "stopped": "Stopped: " + str(event.get("reason", ""))[:200]}.get(status, status)
+    return None
+
+
+def show_trace(run_dir):
+    lines = [line for line in map(describe, events(run_dir)) if line]
+    st.markdown("\n".join(f"- {line}" for line in lines) or "Starting…")
+
+
+def show_build(result):
+    saved = json.loads(Path(result["workflow"]).read_text())
+    st.dataframe([{"#": n, "tool": s["op"], "table": s["table"],
+                   "iterates": f"{s['for_each']}{' (linked only)' if s['only_linked'] else ''} × {s['lines']} lines"
+                   if s["op"] == "append_rows" else "", "intent": s["intent"]}
+                  for n, s in enumerate(saved["plan"]["steps"], 1)], width="stretch", hide_index=True)
+    with st.expander("Expressions and learned checks"):
+        st.dataframe([{"table": s["table"], "column": c, "expression": json.dumps(e)}
+                      for s in saved["plan"]["steps"] for c, e in s.get("columns", {}).items()], width="stretch", hide_index=True)
+        kinds = Counter(c["kind"] for c in saved["checks"])
+        st.caption(f"{len(saved['checks'])} checks learned from the example: " + ", ".join(f"{k} {n}" for k, n in kinds.most_common()))
+        if saved.get("answers"):
+            st.caption("Recorded answers: " + "; ".join(f"{a['question']} → {a['answer']}" for a in saved["answers"]))
+    evidence = Path(result["run_dir"]) / "evidence.json"
+    if evidence.exists():
+        with st.expander("What code found in the files (what the model saw, private values masked)"):
+            st.json(json.loads(evidence.read_text()), expanded=False)
+    download("workflow.json", result["workflow"])
+    download("output.xlsx", result["output"])
+
+
+def show_run(result):
+    if result.get("mapping"):
+        st.dataframe([{"column": k, "was": v["from"], "now": v["to"], "decided by": v["decided_by"]}
+                      for k, v in result["mapping"].items()], width="stretch", hide_index=True)
+    for change in result.get("binding_changes", []):
+        st.caption("Found by its headers: " + change)
+    outputs = Path(result.get("run_dir", "")) / "outputs.json"
+    if outputs.exists():
+        for table, rows in json.loads(outputs.read_text()).items():
+            with st.expander(f"{table} ({len(rows)} rows)"):
+                st.dataframe(rows, width="stretch")
+    download("output.xlsx", result.get("output", ""))
+    if result.get("adapted"):
+        download("workflow.json (updated)", result["workflow"])
+
+
+def download(label, path):
+    path = Path(path)
+    if path.is_file():
+        st.download_button(f"Download {label}", path.read_bytes(), file_name=path.name, key=f"dl-{path}-{label}")
+
+
+def finish(job):
+    s, result = state(), job["result"] or {}
+    if job["error"]:
+        say(f"That failed: {job['error']}", run_dir=str(job["run_dir"]))
+        return
+    status = result.get("status")
+    if job["kind"] == "build" and status == "success":
+        s.workflow = Path(result["workflow"])
+        s.built_from = {Path(p) for p in result["files"]}
+        text = (f"Learned the workflow in {result['attempts']} model call{'s' if result['attempts'] > 1 else ''} and checked "
+                "it against the example. To use it, attach a new or changed input and say **run**.")
+    elif job["kind"] == "run" and status == "success":
+        if result.get("adapted"):
+            s.workflow = Path(result["workflow"])
+            text = f"The input's layout changed, so I adapted the workflow to version {result['workflow_version']} and re-ran every check."
+        else:
+            text = "Ran the workflow: " + ", ".join(f"`{k}` {v} rows" for k, v in result.get("rows", {}).items()) + "."
+    elif status == "needs_input":
+        text = ("I need these answered before I can finish:\n" + "\n".join(f"- {q['question']}" for q in result.get("questions", []))
+                + f"\n\nSay **{job['kind']}** again and I will ask them one by one.")
+    elif status == "budget_exhausted":
+        text = "I could not match the example within the model-call budget. The trace shows what still differed."
+    else:
+        text = "Stopped: " + str(result.get("reason") or result.get("note") or status)
+    say(text, run_dir=str(job["run_dir"]), kind=job["kind"], result=result)
+
+
+# --- page --------------------------------------------------------------------------------------------
+
+st.set_page_config(page_title="Ylookup workflow builder", layout="centered")
 st.title("Ylookup workflow builder")
-st.session_state.setdefault("answers", {})
+s = state()
 
 with st.sidebar:
-    st.subheader("Model")
     try:
-        _, model = settings()
-        st.success(f"`{model}`\n\nOpenRouter key found")
+        st.success(f"Model `{settings()[1]}`")
     except ValueError as error:
-        model = None
         st.error(str(error))
-    st.subheader("Add files")
-    for upload in st.file_uploader("Saved to data/uploads", accept_multiple_files=True,
-                                   type=["xlsx", "pdf", "txt", "md", "json"]) or []:
-        UPLOADS.mkdir(parents=True, exist_ok=True)
-        (UPLOADS / upload.name).write_bytes(upload.getvalue())
-    st.caption("Files are read from data/, examples/, workflows/ and runs/.")
+    local = sorted(p for folder in ("data", "examples", "workflows") for p in Path(folder).glob("**/*")
+                   if p.suffix.lower().lstrip(".") in TYPES and not p.name.startswith("~$") and UPLOADS not in p.parents)
+    picked = st.multiselect("Add files already on this machine", local, format_func=str, key=f"local-{len(s.files)}")
+    if picked and st.button("Add to the conversation"):
+        added = [p for p in picked if p not in s.files]
+        s.files += added
+        s.messages.append({"role": "user", "text": "📎 " + ", ".join(f"`{p.name}`" for p in added)})
+        current = roles()
+        say("I read the files:\n" + "\n".join(f"- `{p.name}`: {role_of(p, current)}" for p in added) + "\n\n" + next_step())
+        st.rerun()
+    if s.files:
+        st.caption("Files in this conversation")
+        current = roles()
+        for path in s.files:
+            st.write(f"`{path.name}` · {role_of(path, current)}")
+    if s.workflow:
+        st.caption(f"Current workflow: `{s.workflow}`")
+    if st.button("New conversation"):
+        st.session_state.clear()
+        st.rerun()
 
-build_tab, run_tab, adapt_tab, runs_tab = st.tabs(["1 · Build", "2 · Run", "3 · Adapt (stress test)", "Run history"])
-
-with build_tab:
-    st.caption("Learns a workflow from input + completed target + context. The model proposes a plan; "
-               "code executes it, compares with the target and feeds differences back; fields that already match are locked.")
-    left, right = st.columns(2)
-    with left:
-        workbook = pick("Input workbook", ".xlsx", "input", "b-in")
-        target = pick("Completed target workbook", ".xlsx", "output", "b-target")
-    with right:
-        bank = pick("Bank statement", ".pdf", "", "b-bank")
-        context = pick("Customer context (plain text)", ".txt", "context", "b-ctx")
-    attempts = st.slider("Model call budget", 1, MAX_ATTEMPTS, MAX_ATTEMPTS)
-    with st.expander(f"Accepted answers ({len(st.session_state.answers)})"):
-        st.json(st.session_state.answers)
-        if st.button("Clear answers"):
-            st.session_state.answers = {}
-            st.rerun()
-    if st.button("Build workflow", type="primary", disabled=not (model and workbook and target and bank and context)):
-        key, model = settings()
-        run_dir = new_run("build")
-        with st.spinner("Building: model proposes, code executes and compares…"):
-            try:
-                result = build_workflow(workbook, target, bank, context, st.session_state.answers,
-                                        OpenRouter(key, model, PROMPT_VERSION, 8000), Events(run_dir, (key,)), attempts)
-            except Exception as error:
-                result = {"status": "error", "reason": str(error)}
-        st.session_state.build = {**result, "run_dir": str(run_dir)}
-    if "build" in st.session_state:
-        result = st.session_state.build
-        status_banner(result)
-        if result.get("reason"):
-            st.write(result["reason"])
-        table = attempts_table(result["run_dir"])
-        if table:
-            st.subheader("Iterations")
-            st.dataframe(table, width="stretch")
-        answer_questions(result.get("questions", []), "b")
-        if result["status"] == "success":
-            st.caption(f"Workflow saved to `{result['workflow']}` after {result['attempts']} model calls")
-            st.json(json.loads(Path(result["workflow"]).read_text()), expanded=False)
-            download("Download workflow.json", result["workflow"], "b-dl-wf")
-            download("Download output.xlsx", result["output"], "b-dl-out")
-        st.caption(f"Run folder: `{result['run_dir']}`")
-
-with run_tab:
-    st.caption("Runs a saved workflow on an input with no target, no build transcript and no model call.")
-    run_panel("run", "input")
-
-def show_adapt_result(result):
-    if result.get("adapted"):
-        st.success(f"Workflow updated to version {result['workflow_version']}")
-    elif result.get("note"):
-        st.info(result["note"])
-    if result.get("mapping"):
-        st.dataframe([{"column": field, **change} for field, change in result["mapping"].items()],
-                     width="stretch")
-    if result.get("workflow") and result.get("adapted"):
-        download("Download updated workflow.json", result["workflow"], "a-dl-wf")
-    show_run_result(result, "adapt")
+for message in s.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["text"])
+        if message.get("run_dir"):
+            with st.expander("Trace"):
+                show_trace(message["run_dir"])
+        if message.get("result", {}).get("status") == "success":
+            (show_build if message.get("kind") == "build" else show_run)(message["result"])
 
 
-with adapt_tab:
-    st.caption("Gives the existing workflow a changed input. Renamed tabs and moved columns are re-found by meaning. "
-               "If a known column is gone, the model picks its replacement from the unrecognised headers; code "
-               "checks the pick and re-runs every check before saving workflow v+1. Otherwise it asks.")
-    left, right = st.columns(2)
-    with left:
-        a_workflow = pick("Existing workflow", ".json", "reconciliation", "a-wf")
-        a_input = pick("Changed input workbook", ".xlsx", "stress", "a-in")
-    with right:
-        a_bank = pick("Bank statement", ".pdf", "", "a-bank")
-        a_context = pick("Customer context", ".txt", "context", "a-ctx")
+@st.fragment(run_every=1.0)
+def live():
+    job = state().job
+    if job is None:
+        return
+    with st.chat_message("assistant"):
+        with st.status("Waiting for your answer" if job["pending"] else "Working…", expanded=True):
+            show_trace(job["run_dir"])
+        current = next((q for q in job["pending"] if q["id"] not in job["collected"]), None)
+        if current:
+            st.markdown(f"**{current['question']}**")
+            for option in current.get("options") or []:
+                if st.button(option, key=f"opt-{current['id']}-{option}"):
+                    answer(job, current, option)
+                    st.rerun(scope="app")
+            st.caption(("Pick an option or type" if current.get("options") else "Type") + " your answer below.")
+    if not job["thread"].is_alive():
+        state().job = None
+        finish(job)
+        st.rerun(scope="app")
 
-    def adapt():
-        key, model = settings()
-        try:
-            return adapt_workflow(a_workflow, a_input, a_bank, a_context, OpenRouter(key, model, ADAPT_PROMPT_VERSION, 1500),
-                                  new_run("adapt"), st.session_state.answers)
-        except Exception as error:
-            return {"status": "error", "reason": str(error), "run_dir": ""}
 
-    if st.button("Adapt workflow", type="primary", disabled=not (model and a_workflow and a_input and a_bank)):
-        with st.spinner("Running the existing workflow, then adapting if needed…"):
-            st.session_state.adapt = adapt()
-    if "adapt" in st.session_state:
-        show_adapt_result(st.session_state.adapt)
+live()
 
-with runs_tab:
-    runs = sorted((p for p in RUNS.glob("*") if (p / "events.jsonl").exists()), key=lambda p: p.stat().st_mtime, reverse=True)
-    if runs:
-        chosen = st.selectbox("Run", runs, format_func=lambda p: p.name)
-        events = read_events(chosen)
-        st.dataframe([{"#": e["sequence"], "event": e["event"], "attempt": e.get("attempt"), "status": e.get("status"),
-                       "summary": str(e.get("reason") or e.get("question") or e.get("operation") or e.get("validation_error") or "")[:200]}
-                      for e in events], width="stretch")
-        with st.expander("Raw events"):
-            st.json(events, expanded=False)
+submitted = st.chat_input("Message, or attach files", accept_file="multiple", file_type=TYPES)
+if submitted:
+    text = (submitted.text or "").strip()
+    new = []
+    for upload in submitted.files or []:
+        s.folder.mkdir(parents=True, exist_ok=True)
+        path = s.folder / upload.name
+        path.write_bytes(upload.getvalue())
+        if path not in s.files:
+            s.files.append(path)
+        new.append(path)
+    job = s.job
+    pending = next((q for q in job["pending"] if q["id"] not in job["collected"]), None) if job else None
+    if pending and text:
+        answer(job, pending, text)
     else:
-        st.info("No runs yet.")
+        attached = "".join(f"\n\n📎 `{p.name}`" for p in new)
+        if text or new:
+            s.messages.append({"role": "user", "text": (text or "") + attached})
+        if job:
+            say("I am still working on the last request; the trace above shows where I am.")
+        else:
+            current = roles()
+            if new:
+                say("I read the files:\n" + "\n".join(f"- `{p.name}`: {role_of(p, current)}" for p in new)
+                    + "".join(f"\n- I could not tell: {q['question']}" for q in current["questions"]))
+            command = text.lower()
+            if text and not any(word in command.split() for word in ("build", "run", "adapt")):
+                s.description.append(text)
+            can_build = current["input"] and current["target"]
+            if "build" in command and can_build:
+                build()
+            elif any(word in command for word in ("run", "adapt")) and current["workflows"] and run_input():
+                run()
+            elif can_build and text and len(description().split()) >= 15 and (current["input"], current["target"]) != s.last_build:
+                build()  # the description just became complete: start learning
+            else:
+                say(next_step())
+    st.rerun()

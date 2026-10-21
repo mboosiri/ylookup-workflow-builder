@@ -5,7 +5,6 @@ import json
 
 from openpyxl import Workbook
 
-from ylookup.sources import parse_statement
 
 OUTPUT = ["Entity", "Entry", "Line", "Posted", "Type", "Account", "Debit", "Amount", "Comment", "Bank", "Batch", "Partner", "Ref"]
 PRIVATE = ["Taylor Reed", "Morgan Vale", "Example fund", "Example account", "2026-02-24", "TAYLOR REE"]
@@ -15,11 +14,12 @@ def statement(description="REF TAYLOR REE", currency="USD", kind="deposit", amou
     header = f"{'Date':<15}{'Description':<55}{'Withdrawal':>14}{'Deposit':>14}{'Balance':>14}"
     debit, credit = ("", amount) if kind == "deposit" else (amount, "")
     record = f"{'24 Feb 2026':<15}{description:<55}{debit:>14}{credit:>14}{'900.00':>14}"
-    return f"Currency : {currency}\n{header}\n{record}\n   MORE WRAPPED REFERENCE\n   Thank you for banking\n"
+    return f"Currency : {currency}\n{header}\n{record}\n   MORE WRAPPED REFERENCE\n\n   Thank you for banking\n"
 
 
-def parsed(*pages, currency="USD"):
-    return parse_statement([(i, text) for i, text in enumerate(pages or [statement(currency=currency)], 1)])
+def pages(*texts, currency="USD"):
+    """PDF page texts for the fake bank.pdf (patched in for ylookup.sources.pdf_pages)."""
+    return list(texts or [statement(currency=currency)])
 
 
 def fixtures(folder):
@@ -70,19 +70,20 @@ def fixture_plan():
     var = lambda name: {"var": name}
     line = lambda first, second: {"line": [first, second]}
     return {"intent": "Reconcile receipts and prepare the import", "steps": [
-        {"op": "match_receipts", "intent": "Identify who paid", "table": "Roster", "name": "Investor", "policy": "full_or_unique_prefix"},
-        {"op": "append_rows", "intent": "Stage the statement", "table": "Staging", "for_each": "statement", "only_received": False,
-         "lines": 1, "columns": {"Date": var("receipt.date"), "Description": var("receipt.description"),
-                                 "Deposit": var("receipt.amount"), "Matched Investor": col("Roster", "Investor")}},
+        {"op": "link_rows", "intent": "Identify who paid", "table": "bank", "text": "Description", "to": "Roster",
+         "name": "Investor", "policy": "full_or_unique_prefix"},
+        {"op": "append_rows", "intent": "Stage the statement", "table": "Staging", "for_each": "bank", "only_linked": False,
+         "lines": 1, "columns": {"Date": col("bank", "Date"), "Description": col("bank", "Description"),
+                                 "Deposit": col("bank", "Deposit"), "Matched Investor": col("Roster", "Investor")}},
         {"op": "fill_columns", "intent": "Paid versus called", "table": "Roster", "columns": {
-            "Receipt Date": var("receipt.date"), "Amount Received": var("receipt.amount"),
-            "Amount outstanding": {"sub": [col("Roster", "Amount Called"), var("receipt.amount")]}}},
+            "Receipt Date": {"first": "bank.Date"}, "Amount Received": {"sum": "bank.Deposit"},
+            "Amount outstanding": {"sub": [col("Roster", "Amount Called"), {"sum": "bank.Deposit"}]}}},
         {"op": "append_rows", "intent": "Two balancing lines per partner", "table": "Import", "for_each": "Roster",
-         "only_received": False, "lines": 2, "columns": {
-             "Entity": col("Fund", "Legal Entity"), "Entry": var("entry"), "Line": var("line"), "Posted": var("receipt.date"),
+         "only_linked": False, "lines": 2, "columns": {
+             "Entity": col("Fund", "Legal Entity"), "Entry": var("entry"), "Line": var("line"), "Posted": {"first": "bank.Date"},
              "Type": line("Cash received", "Due from partners"),
              "Account": {"lookup": {"table": "Accounts", "where": "Transaction Type", "equals": {"out": "Type"}, "return": "Account Code"}},
-             "Debit": line("Y", "N"), "Amount": var("receipt.amount"),
+             "Debit": line("Y", "N"), "Amount": {"sum": "bank.Deposit"},
              "Comment": {"concat": ["Paid by ", col("Roster", "Investor")]},
              "Bank": line(col("Fund", "Bank Account"), None), "Batch": col("Fund", "Batch Type"),
              "Partner": line(None, col("Roster", "Investor")), "Ref": var("row")}}]}
@@ -110,8 +111,8 @@ def built(folder):
     from ylookup.builder import build_workflow
     from ylookup.events import Events
     source, target, bank, context = fixtures(folder)
-    with patch("ylookup.planner.read_statement", return_value=parsed()):
-        result = build_workflow(source, target, bank, context, {}, FakeModel([fixture_plan()]), Events(folder / "build"))
+    with patch("ylookup.sources.pdf_pages", return_value=pages()):
+        result = build_workflow(source, target, [bank], context, {}, FakeModel([fixture_plan()]), Events(folder / "build"))
     return Path(result["workflow"]), source, bank, context
 
 
