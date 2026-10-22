@@ -15,6 +15,7 @@ import time
 
 import streamlit as st
 
+import ylookup
 from ylookup.adapt import PROMPT_VERSION as ADAPT_PROMPT_VERSION, adapt_workflow
 from ylookup.builder import MAX_ATTEMPTS, PROMPT_VERSION, build_workflow, guess_roles
 from ylookup.events import Events, run_name
@@ -33,7 +34,8 @@ SAMPLE = next((files for files in (
     [Path("data/import-capital-call-notice-diu-input.xlsx"), Path("data/import-capital-call-notice-diu-output.xlsx"),
      Path("data/BS-Test-4.pdf")]) if all(p.exists() for p in files)), []) + [Path("examples/reconciliation-context.txt")]
 OFF_TOPIC_REPLY = "I can only learn and run spreadsheet workflows, so I left that out of the job description."
-ASSISTANT, USER = ":material/smart_toy:", ":material/person:"
+LOGO = str(Path(ylookup.__file__).with_name("logo.svg"))
+ASSISTANT, USER = LOGO, ":material/person:"
 ICONS = {"input": ":material/input:", "completed example": ":material/task_alt:", "source": ":material/description:",
          "workflow": ":material/account_tree:", "description": ":material/notes:", "new input": ":material/fiber_new:"}
 # ponytail: a word list, not a classifier; it catches requests for things the builder never makes.
@@ -389,7 +391,8 @@ def finish(job):
 
 # --- page --------------------------------------------------------------------------------------------
 
-st.set_page_config(page_title="Ylookup workflow builder", page_icon=":material/smart_toy:", layout="centered")
+st.set_page_config(page_title="Ylookup workflow builder", page_icon=LOGO, layout="centered")
+st.logo(LOGO, size="large")
 st.title("Ylookup workflow builder")
 st.caption("Learns a spreadsheet job from one worked example, then repeats it on new files.")
 s = state()
