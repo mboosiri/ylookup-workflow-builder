@@ -92,8 +92,8 @@ Private values (names, the fund, bank references, dates) are replaced by tokens 
 
 **Measured:** 30 of 30 unattended live builds on the generic code, each in 1–2 model calls (about
 $0.002), none needing code to adopt a candidate; see [design.md](docs/design.md#known-limitations).
-Re-measured on the current code (22 October 2026): 3 of 3 with the brief's description (2 calls each),
-and 3 of 3 with a one-line description (2–4 calls); see the stress section below.
+Re-measured on the current code (prompt v22, 22 October 2026): 9 of 9 across three descriptions
+(the brief's, a one-line one and a fund manager's), 1–4 calls each, none asking a person; see the stress section below.
 A failed build saves nothing.
 
 The generated workflow for this case is committed at [workflows/reconciliation-v3.json](workflows/reconciliation-v3.json).
@@ -167,17 +167,19 @@ Measured (3 repeats each, 22 October 2026, current code):
 
 | Scenario | Expect | Result | Model calls |
 |---|---|---|---|
-| build, brief's description | iterate | ✅ 3 of 3 succeeded; each first attempt differed, the second matched | 2 |
-| build, one-line description ("match the investor's name from a bank statement, check paid vs owed") | iterate | ✅ 3 of 3 succeeded; the model first chose full names only, the link note turned it to partial names; 1 run also asked a person | 2–4 |
+| build, brief's description | iterate | ✅ 3 of 3 succeeded; first attempts differed (one was invalid), later ones matched | 2–4 |
+| build, one-line description ("match the investor's name from a bank statement, check paid vs owed") | iterate | ✅ 3 of 3 succeeded, no person asked; twice the model first chose full names only, tried to ask, got the link note back and switched to partial names | 2–3 |
+| build, a fund manager's description (purpose and inputs only, no matching rule) | iterate | ✅ 3 of 3 succeeded, no person asked | 1–2 |
 | `duplicate-name`, `unknown-payer` | ask | ✅ 3 of 3 asked (`link`), no model call; after "leave it unlinked" the run finishes | 0 |
 | `missing-data` | ask | ✅ 3 of 3 asked (4 `missing_value`) | 0 |
 | `ambiguous-amounts` | ask | ✅ 3 of 3 asked (`column_mapping`) | 1 |
 | `distractor-column` | ask or map | ✅ 3 of 3 asked | 1 |
-| `tracker-reshuffled` | ask or map | ✅ 2 mapped and verified, 1 asked | 1 |
+| `tracker-reshuffled` | ask or map | ✅ 1 mapped and verified, 2 asked | 1 |
 | `tabs-renamed`, `columns-reordered`, `extra-investor` | no question | ✅ 3 of 3 quiet | 0 |
 
 Before the link note, the one-line description built 2 of 3 (one stopped at a question the files already
-answered). Use `--context <file>` to score another description.
+answered); before the note named the columns a failed link leaves blank, a chat build ended by asking the
+person how to write the plan. Use `--context <file>` to score another description.
 
 None guessed, none over-asked. A row a person leaves unlinked (the customer's "leave it blank to chase up
 later") is staged with a blank investor and credited to nobody; the learned checks excuse its link columns

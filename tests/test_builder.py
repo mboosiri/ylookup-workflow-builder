@@ -215,6 +215,12 @@ class BuildTest(unittest.TestCase):
         links = json.loads(client.messages[1][-1]["content"])["links"]
         self.assertEqual(len(links), 1)
         self.assertIn("with full_name_only linked 0 of 1 rows; with full_or_unique_prefix it links 1 of 1", links[0])
+        for column in ("Staging.Matched Investor", "Roster.Amount Received", "Import.Amount"):
+            self.assertIn(column, links[0])  # the columns blank because of the failed link
+        for column in ("Staging.Date", "Import.Partner"):
+            self.assertNotIn(column, links[0])  # these read their own row, not across the link
+        self.assertIn("Fix the link_rows step", links[0])
+        self.assertIn("never ask how to write a step", client.messages[0][0]["content"])
 
     def test_a_question_the_link_evidence_answers_goes_back_to_the_model_once_before_a_person(self):
         strict = fixture_plan()

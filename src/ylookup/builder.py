@@ -24,7 +24,7 @@ from .sources import (answered, bind_tables, canon, column_types, equivalent, fi
 from .workbook import compare_outputs, plain, read_outputs, write_outputs
 
 
-PROMPT_VERSION = "workflow-plan-v21"
+PROMPT_VERSION = "workflow-plan-v22"
 MAX_ATTEMPTS = 5
 # ponytail: tables with up to 50 records are treated as private (people, entities); larger ones as
 # reference lists. Replace with an explicit privacy setting if a real roster is bigger.
@@ -46,6 +46,9 @@ example of the same job:
 Reply with JSON, either {"status":"ready","workflow":PLAN,"question":null,"options":null} or
 {"status":"needs_input","workflow":null,"question":"...","options":[...] or null} when something
 essential is ambiguous and neither the evidence nor the customer's description settles it.
+Ask only what the customer decides about the business: which data, which rule, which policy. The
+person cannot read the plan, so never ask how to write a step, an expression or a link; when your
+plan gives wrong values, change the plan using the feedback and return it.
 
 PLAN = {"intent": text, "steps": [STEP, ...]}. Each step is one tool call with its own intent.
 Intents say what the job does for the business, never how an earlier attempt was fixed.
@@ -156,25 +159,44 @@ def link_evidence(env):
     return found[:1] + [e for e in found[1:3] if e["linked_full_or_unique_prefix"] >= 2]
 
 
-def link_notes(plan, env, evidence):
-    """For each link the plan made: how many rows it linked, against what the evidence shows another choice links.
-    Evidence only; the model still decides."""
+def through(plan, source, to, wrong):
+    """Differing output columns that read across a link: rows of one side reading the other side's columns."""
+    found = []
+    for step in (s for s in plan["steps"] if s["op"] != "link_rows"):
+        iterated = step.get("for_each", step["table"])
+        other = {source: to, to: source}.get(iterated)
+        for column, expression in step["columns"].items():
+            if other and (step["table"], column) in wrong and f'"{other}.' in json.dumps(expression):
+                found.append(f"{step['table']}.{column}")
+    return found
+
+
+def link_notes(plan, env, evidence, wrong=()):
+    """For each link the plan made: how many rows it linked, against what the evidence shows another choice links,
+    and which differing columns read across it. Evidence only; the model still decides."""
     notes = []
     for step in (s for s in plan["steps"] if s["op"] == "link_rows"):
         rows = env["links"].get(step["table"], {}).get("rows", {})
         linked = sum(r is not None for r in rows.values())
         pair = (step["table"], step["text"], step["to"], step["name"])
         same = [e for e in evidence if (e["table"], e["text"], e["to"], e["name"]) == pair]
+        note = None
         for e in same:
             best = max(POLICIES, key=lambda p: e[f"linked_{p}"])
             if e[f"linked_{best}"] > linked:
-                notes.append(f"link_rows {step['table']}.{step['text']} -> {step['to']}.{step['name']} with {step['policy']} "
-                             f"linked {linked} of {len(rows)} rows; with {best} it links {e[f'linked_{best}']} of {e['rows']}.")
+                note = (f"link_rows {step['table']}.{step['text']} -> {step['to']}.{step['name']} with {step['policy']} "
+                        f"linked {linked} of {len(rows)} rows; with {best} it links {e[f'linked_{best}']} of {e['rows']}.")
         if not same and evidence and evidence[0]["linked_full_or_unique_prefix"] > linked:
             e = evidence[0]
-            notes.append(f"link_rows {step['table']}.{step['text']} -> {step['to']}.{step['name']} linked {linked} of {len(rows)} "
-                         f"rows; the strongest link evidence is {e['table']}.{e['text']} -> {e['to']}.{e['name']}, which links "
-                         f"{e['linked_full_or_unique_prefix']} of {e['rows']}.")
+            note = (f"link_rows {step['table']}.{step['text']} -> {step['to']}.{step['name']} linked {linked} of {len(rows)} "
+                    f"rows; the strongest link evidence is {e['table']}.{e['text']} -> {e['to']}.{e['name']}, which links "
+                    f"{e['linked_full_or_unique_prefix']} of {e['rows']}.")
+        if note:
+            affected = through(plan, step["table"], step["to"], wrong)
+            if affected:
+                note += (f" Rows it leaves unlinked are why these columns differ: {', '.join(affected)}. "
+                         "Fix the link_rows step, not their expressions.")
+            notes.append(note)
     return notes
 
 
@@ -868,7 +890,7 @@ def build_workflow(workbook, target, sources, context, answers, client, events, 
                     summary, error_lines = summarise(differences, plan, errors, learned["fits"],
                                                      {o["table"]: o["columns"] for o in learned["profile"]["outputs"]})
                     feedback = {"differences": summary, "total_differences": len(differences)}
-                    links = evidence_notes = link_notes(plan, env, learned["profile"]["links"])
+                    links = evidence_notes = link_notes(plan, env, learned["profile"]["links"], previous_wrong)
                     if links:
                         feedback["links"] = links
                     if error_lines:
