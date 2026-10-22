@@ -51,6 +51,15 @@ class RunTest(unittest.TestCase):
         book.close()
         self.assertIn("Morgan Vale", (self.folder / "answered/answers.json").read_text())
 
+    def test_a_source_file_left_out_is_named_instead_of_asking_for_another_table(self):
+        result = run_workflow(self.workflow, self.source, [], self.folder / "no-source")
+        self.assertEqual(result["status"], "stopped")
+        self.assertIn("from bank.pdf when it was built", result["reason"])
+        saved = json.loads(Path(self.workflow).read_text())
+        del saved["tables"]["bank"]["file"]  # a workflow saved before tables recorded their file
+        result = run_workflow(self.workflow, self.source, [], self.folder / "older", saved=saved)
+        self.assertIn("from bank.pdf when it was built", result["reason"])
+
     def test_an_unclear_payer_is_asked_about_never_guessed(self):
         for name, roster_change, description in [("nobody", None, "REF UNKNOWN PAYER"),
                                                  ("two", ("Roster", "B4", "Taylor Reeves"), "REF TAYLOR REE")]:

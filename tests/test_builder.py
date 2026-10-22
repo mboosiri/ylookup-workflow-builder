@@ -104,11 +104,12 @@ class BuildTest(unittest.TestCase):
 
     def test_a_model_question_reaches_the_person_with_real_values_not_tokens(self):
         tokened = {"status": "needs_input", "workflow": None, "question": "Is V_1 the payer?",
-                   "options": ["V_1", "V_2"]}
+                   "options": ["V_1", "V_2", "V_999"]}
         asked = []
         self.build([tokened], ask=lambda items: asked.extend(items) or {})
         shown = json.dumps(asked[0]["question"]) + json.dumps(asked[0]["options"])
         self.assertNotRegex(shown, r"\bV_\d+\b")
+        self.assertEqual(len(asked[0]["options"]), 2)  # V_999 names nothing, so it is dropped
 
     def test_without_a_person_questions_stop_with_ids_an_answers_file_can_settle(self):
         blocked, client, events, _ = self.build([], [statement(currency="EUR")])
@@ -205,6 +206,26 @@ class BuildTest(unittest.TestCase):
         self.assertEqual({d["column"] for d in feedback[1]["differences"]}, {"Comment"})
         self.assertLess(len(feedback[0]["locked_columns"]), len(feedback[1]["locked_columns"]))
         self.assertIn("Import.Debit", feedback[1]["locked_columns"])
+
+    def test_a_link_rule_that_links_less_than_the_evidence_is_pointed_out(self):
+        strict = fixture_plan()
+        strict["steps"][0]["policy"] = "full_name_only"
+        result, client, _, _ = self.build([strict, fixture_plan()])
+        self.assertEqual((result["status"], result["attempts"]), ("success", 2))
+        links = json.loads(client.messages[1][-1]["content"])["links"]
+        self.assertEqual(len(links), 1)
+        self.assertIn("with full_name_only linked 0 of 1 rows; with full_or_unique_prefix it links 1 of 1", links[0])
+
+    def test_a_question_the_link_evidence_answers_goes_back_to_the_model_once_before_a_person(self):
+        strict = fixture_plan()
+        strict["steps"][0]["policy"] = "full_name_only"
+        which = {"status": "needs_input", "workflow": None, "question": "Which partner paid?", "options": None}
+        asked = []
+        result, client, _, _ = self.build([strict, which, fixture_plan()], ask=lambda items: asked.extend(items) or {})
+        self.assertEqual((result["status"], result["attempts"], asked), ("success", 3, []))
+        self.assertIn("Before asking a person", client.messages[2][-1]["content"])
+        result, _, _, _ = self.build([strict, which, which], ask=lambda items: asked.extend(items) or {})
+        self.assertEqual([q["question"] for q in asked], ["Which partner paid?"])  # asked again: now a person answers
 
     def test_a_clean_job_asks_nothing(self):
         asked = []

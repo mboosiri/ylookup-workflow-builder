@@ -156,6 +156,28 @@ def link_evidence(env):
     return found[:1] + [e for e in found[1:3] if e["linked_full_or_unique_prefix"] >= 2]
 
 
+def link_notes(plan, env, evidence):
+    """For each link the plan made: how many rows it linked, against what the evidence shows another choice links.
+    Evidence only; the model still decides."""
+    notes = []
+    for step in (s for s in plan["steps"] if s["op"] == "link_rows"):
+        rows = env["links"].get(step["table"], {}).get("rows", {})
+        linked = sum(r is not None for r in rows.values())
+        pair = (step["table"], step["text"], step["to"], step["name"])
+        same = [e for e in evidence if (e["table"], e["text"], e["to"], e["name"]) == pair]
+        for e in same:
+            best = max(POLICIES, key=lambda p: e[f"linked_{p}"])
+            if e[f"linked_{best}"] > linked:
+                notes.append(f"link_rows {step['table']}.{step['text']} -> {step['to']}.{step['name']} with {step['policy']} "
+                             f"linked {linked} of {len(rows)} rows; with {best} it links {e[f'linked_{best}']} of {e['rows']}.")
+        if not same and evidence and evidence[0]["linked_full_or_unique_prefix"] > linked:
+            e = evidence[0]
+            notes.append(f"link_rows {step['table']}.{step['text']} -> {step['to']}.{step['name']} linked {linked} of {len(rows)} "
+                         f"rows; the strongest link evidence is {e['table']}.{e['text']} -> {e['to']}.{e['name']}, which links "
+                         f"{e['linked_full_or_unique_prefix']} of {e['rows']}.")
+    return notes
+
+
 def fits(env, rows):
     """Iterations whose entry count divides the target's row count into 1-9 lines per entry."""
     options = [(key, False) for key, t in env["tables"].items()
@@ -463,7 +485,8 @@ def learn(workbook, target, sources, answers):
     """Everything code can establish before the model is asked: outputs, evidence, candidates, checks."""
     found, questions = read_sources(workbook, sources)
     keys = table_keys(found)
-    spec = {"tables": {key: table_spec(t) for key, t in zip(keys, found)}, "outputs": {}}
+    spec = {"tables": {key: {**table_spec(t), **({"file": Path(t["file"]).name} if t["file"] != str(workbook) else {})}
+                       for key, t in zip(keys, found)}, "outputs": {}}
     bound, _ = bind_tables(spec, found)
     outputs, expected, helpers = learn_outputs(spec, bound, find_tables(sheet_rows(target)))
     for key in [k for k in outputs if bound[k]["file"] != str(workbook)]:  # only the input workbook is written
@@ -779,6 +802,7 @@ def build_workflow(workbook, target, sources, context, answers, client, events, 
         client.schema = reply_schema(learned["schema_view"])
         messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": json.dumps(mask(profile))}]
         locked, tried, previous_plan, previous_wrong = {}, [], None, set()
+        evidence_notes = []  # link notes from the last attempt, offered once before a question goes to a person
         for attempt in range(1, max_attempts + 1):
             content = client.complete(messages, events, attempt)
             messages.append({"role": "assistant", "content": content})
@@ -791,11 +815,20 @@ def build_workflow(workbook, target, sources, context, answers, client, events, 
                 if reply.get("status") == "needs_input":
                     if not isinstance(reply.get("question"), str) or not reply["question"].strip():
                         raise ValueError("A needs_input reply must carry a nonempty question.")
+                    options = [mask.unmask(o) for o in reply.get("options") or []]
+                    options = [o for o in options if not re.fullmatch(r"(?:V|DATE)_\d+", o)]  # tokens the model made up
                     item = question("model_question", mask.unmask(reply["question"]),
                                     hashlib.sha1(reply["question"].encode()).hexdigest()[:10],
-                                    options=[mask.unmask(o) for o in reply.get("options") or []] or None, scope="workflow")
-                    asked[item["id"]] = item
+                                    options=options or None, scope="workflow")
                     events.emit("inquiry", attempt=attempt, question=item)
+                    if evidence_notes and answered(item, answers) is None:
+                        # Deduce before asking: the files already show something about this; the model gets it once.
+                        feedback = {"links": evidence_notes, "instruction": "Before asking a person, use this evidence from "
+                                    "the files. If it settles your question, return the workflow; otherwise ask again."}
+                        evidence_notes = []
+                        messages.append({"role": "user", "content": json.dumps(mask(feedback))})
+                        continue
+                    asked[item["id"]] = item
                     if answered(item, answers) is None and ask_until_settled([item], answers, ask):
                         return needs_input(events, [item])
                     feedback = {"answer": answered(item, answers), "instruction": "A person answered your question. Use it and return the workflow."}
@@ -835,6 +868,9 @@ def build_workflow(workbook, target, sources, context, answers, client, events, 
                     summary, error_lines = summarise(differences, plan, errors, learned["fits"],
                                                      {o["table"]: o["columns"] for o in learned["profile"]["outputs"]})
                     feedback = {"differences": summary, "total_differences": len(differences)}
+                    links = evidence_notes = link_notes(plan, env, learned["profile"]["links"])
+                    if links:
+                        feedback["links"] = links
                     if error_lines:
                         feedback["expression_errors"] = error_lines
                     if failures:

@@ -45,10 +45,10 @@ def trace(directory):
     return [json.loads(line) for path in Path(directory).rglob("events.jsonl") for line in path.read_text().splitlines()]
 
 
-def build_once(key, model, directory):
+def build_once(key, model, directory, context):
     asked = []
     events = Events(directory, (key,))
-    result = build_workflow(INPUT, TARGET, SOURCES, CONTEXT, json.loads(ANSWERS.read_text()),
+    result = build_workflow(INPUT, TARGET, SOURCES, context, json.loads(ANSWERS.read_text()),
                             OpenRouter(key, model, PROMPT_VERSION, 8000), events, ask=recorder(asked))
     comparisons = [e["status"] for e in trace(directory) if e["event"] == "comparison"]
     return {"status": result["status"], "calls": sum(e["event"] == "model_request" for e in trace(directory)),
@@ -71,7 +71,7 @@ def verdict(expect, run):
     return "asked" if run["asked"] else ("mapped" if run["status"] == "success" else run["status"])
 
 
-def main(repeats):
+def main(repeats, context):
     try:
         key, model = settings()
     except ValueError as error:
@@ -82,7 +82,7 @@ def main(repeats):
     folder = Path("runs") / time.strftime("stress-agentic-%Y%m%d-%H%M%S")
     rows = []
     for n in range(1, repeats + 1):
-        run = build_once(key, model, folder / f"build-{n}")
+        run = build_once(key, model, folder / f"build-{n}", context)
         rows.append({"scenario": "build", "run": n, **run, "verdict": "iterated" if run["iterated"] else run["status"]})
         print(rows[-1], flush=True)
     for variant, expect in EXPECT.items():
@@ -103,4 +103,6 @@ def main(repeats):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repeats", type=int, default=3)
-    main(parser.parse_args().repeats)
+    parser.add_argument("--context", type=Path, default=CONTEXT, help="the job description the builds use")
+    arguments = parser.parse_args()
+    main(arguments.repeats, arguments.context)

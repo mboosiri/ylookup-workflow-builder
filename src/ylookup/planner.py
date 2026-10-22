@@ -522,6 +522,14 @@ def check_outputs(checks, outputs, env):
 
 # --- run -------------------------------------------------------------------------------------------
 
+def separate_file(saved, key):
+    """The file a workflow table came from at build time, when it was not the input workbook. Workflows built
+    before tables recorded their file fall back to a source named after the table (a PDF's tables are)."""
+    table = saved["tables"][key]
+    sources = saved.get("built_from", {}).get("sources", [])
+    return table.get("file") or next((name for name in sources if Path(name).stem == table["sheet"]), None)
+
+
 def run_workflow(path, workbook, sources, directory, saved=None, answers=None):
     """Phase 2: execute a saved workflow on the input workbook plus any other source files (workbooks, PDFs).
     No target, transcript or model."""
@@ -539,6 +547,12 @@ def run_workflow(path, workbook, sources, directory, saved=None, answers=None):
         layout = {key: {"sheet": t["sheet"], "headers": list(t["headers"].values()),
                         "columns": {name: t["headers"][c] for name, c in t["columns"].items()}} for key, t in bound.items()}
         base.update(binding_changes=binding_changes(saved, bound), bindings=layout)
+        separate = {q["table"]: separate_file(saved, q["table"]) for q in problems if q["code"] == "table_choice"}
+        separate = {key: name for key, name in separate.items() if name}
+        if separate and all(t["file"] == str(workbook) for t in found):
+            return stop(events, directory, {**base, "status": "stopped", "reason": "This workflow also reads "
+                                            + ", ".join(f"'{k}' (from {n} when it was built)" for k, n in separate.items())
+                                            + ", which came from a separate file. Attach that file, or a newer one like it, and run again."})
         if problems:
             return stop(events, directory, {**base, "status": "needs_input", "questions": problems,
                                             "reason": "Some workflow tables or columns are not in this input."})
