@@ -111,6 +111,14 @@ The run uses no target, no build transcript and no model call. It finds each tab
 fingerprint, so renamed tabs and moved columns need no change. It writes `runs/run-<time>/output.xlsx`.
 Verified result: 20 DIU rows and 0 differences from the completed target.
 
+After a run, the result lists what to follow up: records where a computed difference between a record's own
+value and a total over its linked rows is not zero (here `Amount outstanding`: Aaron Patel 5.00, Daniel Brooks
+20.00, and 8 investors with no payment linked). It reads only the plan's formulas and the run's values.
+
+A computed number whose sign the completed example never showed (e.g. a negative `Amount outstanding` after an
+overpayment or a double payment) is a question, not a silent post: post it as computed, or stop for a person.
+The sign range is learned per column from the example; workflows built before this have no such checks.
+
 ## Phase 3: Adapt (stress test)
 
 ```sh

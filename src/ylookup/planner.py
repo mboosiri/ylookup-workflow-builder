@@ -11,8 +11,8 @@ from pathlib import Path
 import re
 
 from .events import Events
-from .sources import (answered, bind_tables, binding_changes, canon, equivalent, kind, link_rows, number, question,
-                      read_sources)
+from .sources import (answered, bind_tables, binding_changes, canon, equivalent, kind, link_rows, money, number,
+                      question, read_sources)
 from .workbook import compare_outputs, plain, read_outputs, write_outputs
 
 
@@ -352,7 +352,7 @@ def unit_questions(env, source, target):
 def run_link(env, source, text_, target, name, policy):
     result = link_rows(env["tables"][source], text_, env["tables"][target], name, policy, env["answers"], source, target)
     env["links"][source] = {"to": target, "rows": result["rows"], "left": result["left"]}
-    env["linked"][target] = {"from": source, "records": result["records"]}
+    env["linked"][target] = {"from": source, "records": result["records"], "name": name}
     for item in result["questions"] + [q for q in unit_questions(env, source, target) if answered(q, env["answers"]) is None]:
         env["questions"][item["id"]] = item
     return result
@@ -404,6 +404,11 @@ def learn_checks(key, columns, target, lines):
         values = [row.get(column) for row in target]
         for line in range(1, lines + 1):
             part = values[line - 1::lines]
+            numbers = [number(v) for v in part if kind(v) == "number"]
+            if any(numbers) and all(kind(v) in (None, "number") for v in part):
+                sign = "non_negative" if min(numbers) >= 0 else "non_positive" if max(numbers) <= 0 else None
+                if sign:
+                    checks.append({"table": key, "kind": "sign", "column": column, "line": line, "allowed": sign})
             if all(kind(v) is None for v in part):
                 checks.append({"table": key, "kind": "blank", "column": column, "line": line})
             elif all(kind(v) for v in part):
@@ -466,6 +471,18 @@ def left_unlinked(output, column, env):
     return rows
 
 
+POST_AS_COMPUTED = "Post it as computed"
+HOLD = "Stop: a person handles it first"
+
+
+def record_label(ctx, table=True):
+    """How a person recognises the record a row came from: the name a link matched it by, its key, or its row."""
+    record, name = ctx["record"], ctx["env"]["linked"].get(ctx["table"], {}).get("name")
+    value = record.get("values", {}).get(name) if name else None
+    label = text(value or record.get("key") or "row " + str(record["row"]))
+    return f"{ctx['table']} {label}" if table else label
+
+
 def check_outputs(checks, outputs, env):
     """Every learned convention, re-checked on this run's rows. Returns plain-language failures.
 
@@ -505,6 +522,20 @@ def check_outputs(checks, outputs, env):
             got, total = sum((number(v) for v in part if kind(v) == "number"), Decimal(0)), totals.get(check["of"])
             if got != total:
                 problem = f"{name} totals {got}, but the linked {check['of']} total {total}"
+        elif kind_ == "sign":
+            for i in indexes:
+                value = values[i]
+                outside = kind(value) == "number" and (number(value) < 0 if check["allowed"] == "non_negative" else number(value) > 0)
+                if outside:
+                    ctx = output["contexts"][i]
+                    label = record_label(ctx)
+                    never = "negative" if check["allowed"] == "non_negative" else "positive"
+                    item = question("value_range", f"{name} is {text(value)} for {label}; in the completed example it was never "
+                                    f"{never}, so this is a case the example does not show. Post it as computed?",
+                                    f"{check['table']}.{column} {label} {canon(value)}", options=[POST_AS_COMPUTED, HOLD], stop=HOLD,
+                                    value=text(value))
+                    if answered(item, env["answers"]) is None:
+                        env["questions"][item["id"]] = item
         elif kind_ == "expression":
             for i in indexes:
                 ctx = {**output["contexts"][i], "out": lambda h, row=rows[i]: row.get(h)}
@@ -518,6 +549,30 @@ def check_outputs(checks, outputs, env):
         if problem:
             failures.append(problem)
     return failures
+
+
+def follow_up(plan, outputs, env):
+    """Records where a computed difference between a record's own value and a total over its linked rows is not
+    zero: what a person may want to chase. Reads only the plan's formulas and this run's values."""
+    report = []
+    for step in plan["steps"]:
+        for column, expression in step.get("columns", {}).items():
+            parts = expression.get("sub") if isinstance(expression, dict) else None
+            # ponytail: only a top-level sub of one linked total and one own value; other shapes are not reported.
+            if not parts or sorted(isinstance(e, dict) and bool(set(e) & set(AGGREGATES)) for e in parts) != [False, True]:
+                continue
+            output, differs, unlinked = outputs[step["table"]], [], 0
+            for ctx, row in zip(output["contexts"], output["rows"]):
+                value = row.get(column)
+                if kind(value) != "number" or number(value) == 0:
+                    continue
+                if env["linked"].get(ctx["table"], {}).get("records", {}).get(ctx["index"]):
+                    differs.append({"record": record_label(ctx, table=False), "value": money(value)})
+                else:
+                    unlinked += 1
+            if differs or unlinked:
+                report.append({"table": step["table"], "column": column, "differs": differs, "nothing_linked": unlinked})
+    return report
 
 
 # --- run -------------------------------------------------------------------------------------------
@@ -569,6 +624,8 @@ def run_workflow(path, workbook, sources, directory, saved=None, answers=None):
         if failures:
             return stop(events, directory, {**base, "status": "stopped", "check_failures": failures,
                                             "reason": "Learned checks failed; no workbook was written: " + "; ".join(failures[:5])})
+        if env["questions"]:
+            return stop(events, directory, {**base, "status": "needs_input", "questions": list(env["questions"].values())})
         output = write_outputs(workbook, Path(directory) / "output.xlsx", bound, outputs)
         expected = {key: keyed(o) for key, o in outputs.items()}
         now = {**saved, "tables": {key: {**table, "headers": layout[key]["headers"], "columns": {
@@ -584,7 +641,7 @@ def run_workflow(path, workbook, sources, directory, saved=None, answers=None):
         (Path(directory) / "answers.json").write_text(json.dumps(given, indent=2))
     events.emit("run_end", status="success", output=str(output), binding_changes=base["binding_changes"])
     return {**base, "status": "success", "output": str(output),
-            "rows": {key: len(o["rows"]) for key, o in outputs.items()}}
+            "rows": {key: len(o["rows"]) for key, o in outputs.items()}, "follow_up": follow_up(saved["plan"], outputs, env)}
 
 
 def stop(events, directory, result):

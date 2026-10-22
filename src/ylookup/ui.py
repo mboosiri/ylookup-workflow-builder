@@ -295,6 +295,17 @@ def download(label, path):
         st.download_button(f"Download {label}", path.read_bytes(), file_name=path.name, key=f"dl-{path}-{label}")
 
 
+def follow_up_text(result):
+    """What a person may want to chase after a run, from the run's own computed differences."""
+    lines = []
+    for item in result.get("follow_up", []):
+        parts = [f"{d['record']} ({d['value']})" for d in item["differs"]]
+        if item["nothing_linked"]:
+            parts.append(f"{item['nothing_linked']} with nothing linked")
+        lines.append(f"- `{item['table']}.{item['column']}` is not zero for " + ", ".join(parts))
+    return "\n\nTo follow up:\n" + "\n".join(lines) if lines else ""
+
+
 def finish(job):
     s, result = state(), job["result"] or {}
     if job["error"]:
@@ -318,6 +329,7 @@ def finish(job):
             text = f"The input's layout changed, so I adapted the workflow to version {result['workflow_version']} and re-ran every check."
         else:
             text = "Ran the workflow: " + ", ".join(f"`{k}` {v} rows" for k, v in result.get("rows", {}).items()) + "."
+        text += follow_up_text(result)
     elif status == "needs_input":
         text = ("I need these answered before I can finish:\n" + "\n".join(f"- {q['question']}" for q in result.get("questions", []))
                 + f"\n\nSay **{job['kind']}** again and I will ask them one by one.")

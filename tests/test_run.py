@@ -51,6 +51,35 @@ class RunTest(unittest.TestCase):
         book.close()
         self.assertIn("Morgan Vale", (self.folder / "answered/answers.json").read_text())
 
+    def run_paying(self, name, *amounts, answers=None):
+        lines = statement(amount=amounts[0]).splitlines()
+        extra = [lines[2].replace(amounts[0].rjust(14), amount.rjust(14)) for amount in amounts[1:]]
+        text = "\n".join(lines[:4] + extra + lines[4:]) + "\n"
+        with patch("ylookup.sources.pdf_pages", return_value=pages(text)):
+            return run_workflow(self.workflow, self.source, [self.bank], self.folder / name, answers=answers)
+
+    def test_a_value_of_a_sign_the_example_never_showed_is_asked_about(self):
+        for name, amounts in [("over", ["150.00"]), ("twice", ["60.00", "60.00"])]:
+            with self.subTest(name):
+                asked = self.run_paying(name, *amounts)
+                self.assertEqual(asked["status"], "needs_input")
+                item = next(q for q in asked["questions"] if q["code"] == "value_range")
+                self.assertIn("Roster.Amount outstanding (line 1) is -", item["question"])
+                self.assertIn("Roster Taylor Reed", item["question"])
+                self.assertFalse((self.folder / name / "output.xlsx").exists())
+                posted = self.run_paying(f"{name}-posted", *amounts, answers={item["id"]: "Post it as computed"})
+                self.assertEqual(posted["status"], "success")
+                held = self.run_paying(f"{name}-held", *amounts, answers={item["id"]: "Stop: a person handles it first"})
+                self.assertEqual(held["status"], "stopped")
+
+    def test_a_run_lists_what_to_follow_up(self):
+        result = self.run_it("short")  # Taylor Reed paid 95 of 100; Morgan Vale paid nothing
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["follow_up"], [{"table": "Roster", "column": "Amount outstanding",
+                                                "differs": [{"record": "Taylor Reed", "value": "5.00"}], "nothing_linked": 1}])
+        exact = self.run_paying("exact", "100.00")
+        self.assertEqual(exact["follow_up"][0]["differs"], [])
+
     def test_a_source_file_left_out_is_named_instead_of_asking_for_another_table(self):
         result = run_workflow(self.workflow, self.source, [], self.folder / "no-source")
         self.assertEqual(result["status"], "stopped")

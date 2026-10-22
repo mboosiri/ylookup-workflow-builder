@@ -115,7 +115,7 @@ sequenceDiagram
 | `plan.steps[].columns` | One expression per output column: a column (of the record, its linked record or a one-row table), a sum or value over linked rows, a counter, a unit, a lookup, a concatenation, arithmetic, a per-line choice or a literal |
 | `tables` | Each table the plan uses: build-time sheet, header fingerprint, and per column its header, value types and position |
 | `outputs` | What the job produces: rows appended to a table, or columns filled in its records |
-| `checks` | Conventions learned from the target: required/blank per line, constant template values, one value per line, equal across an entry, counters, totals that tie to linked rows, lookups and relations |
+| `checks` | Conventions learned from the target: required/blank per line, constant template values, one value per line, equal across an entry, counters, totals that tie to linked rows, lookups and relations, and the sign each number kept (outside it, a person is asked) |
 | `answers` | Policy answers a person gave (id, question, answer) |
 | `workflow_version`, `adaptations` | Version, and each adapt's mapping (from, to, `decided_by`) |
 
@@ -169,6 +169,7 @@ It stores no cell addresses and no answer rows.
   columns, the model often asks instead of mapping; a person answers at the prompt.
 - **Missing sources are asked about, not guessed.** Before any model call, an output column whose example values vary but that no expression over the attached files reproduces is listed in one question: attach the file they come from, or build anyway. A one-row output or a constant column never triggers it.
 - **Rows left unlinked by a person** are excused from checks on columns whose expression names the linked table, and from linked totals. A lookup that reads such a column through another output column is not traced.
+- **Sign ranges come from one example.** A column that can go negative but never did in the example asks once per record and value; the cost is a question, never a wrong number.
 - **Learned checks come from one example.** A convention that holds by coincidence in the target becomes a check. More examples would remove such false rules; today they can only make a run stop, never write a wrong value.
 - **Candidate search is bounded:** single references, lookups keyed by another output column, a prefix/suffix concatenation of one reference, and one add/subtract.
   A column needing more (e.g. a three-term formula) gets examples, and the model must build it.
