@@ -260,6 +260,10 @@ class BuildTest(unittest.TestCase):
     def test_a_column_the_example_leaves_blank_is_adopted_when_the_model_repeats_a_value(self):
         self.assertEqual(only_candidate({"all lines": [None]}), (None,))
         self.assertIsNone(only_candidate({"all lines": [None, "x"]}))
+        self.assertIsNone(only_candidate({"all rows": {"examples": ["a", "b"]}}))  # one line, nothing verified: no crash
+        unexplained = {"steps": [{"op": "append_rows", "table": "T", "columns": {"Note": "x"}}]}
+        self.assertEqual(adopt(copy.deepcopy(unexplained), unexplained, {("T", "Note")},
+                               {"T": {"Note": {"all rows": {"examples": ["a", "b"]}}}}, {}), [])
         stubborn = {"steps": [{"op": "append_rows", "table": "T", "columns": {"Domain": {"col": "F.Domain"}}}]}
         again = copy.deepcopy(stubborn)
         adopted = adopt(again, stubborn, {("T", "Domain")}, {"T": {"Domain": {"all lines": [None]}}}, {})

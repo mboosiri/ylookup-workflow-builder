@@ -24,7 +24,7 @@ from .sources import (answered, bind_tables, canon, column_types, equivalent, fi
 from .workbook import compare_outputs, plain, read_outputs, write_outputs
 
 
-PROMPT_VERSION = "workflow-plan-v22"
+PROMPT_VERSION = "workflow-plan-v23"
 MAX_ATTEMPTS = 5
 # ponytail: tables with up to 50 records are treated as private (people, entities); larger ones as
 # reference lists. Replace with an explicit privacy setting if a real roster is bigger.
@@ -36,7 +36,8 @@ example of the same job:
 - input_tables: every table found in the input and the source files, with the value types of each column.
 - outputs: what the completed example adds: rows appended under an empty header (append_rows) or
   values written into existing records (fill_columns). For appended tables, fits lists the
-  iterations whose row count matches the example. For each output column, code lists candidate
+  iterations whose row count matches the example, and columns_are_for the one the candidates below were
+  verified for (if you choose another fit, the feedback lists the candidates verified for yours). For each output column, code lists candidate
   expressions it verified against the example, either for "all lines"/"all rows" or for one line
   of each entry ("line 1", "line 2", ...). Where none was found it shows examples instead.
 - links: text columns whose values name the records of another table, with how many rows each
@@ -302,19 +303,39 @@ def concats(probed, idx, want, private):
     return found
 
 
-def arithmetic(probed, idx, want):
+def rule_numbers(text):
+    """Numbers the customer's description names, as factors: "20%" -> 0.2, "a 1.5 multiplier" -> 1.5. Code
+    still verifies every candidate built from them against each example row, so a stray number costs nothing."""
+    found = []
+    for match in re.finditer(r"(?<![\w./-])(\d+(?:\.\d+)?)(\s*(?:%|percent\b))?(?![\w/-]|\.\d)", text or ""):
+        value = number(match.group(1)) / (100 if match.group(2) else 1)
+        if value not in (0, 1) and value not in found:
+            found.append(value)
+    return found[:12]
+
+
+def arithmetic(probed, idx, want, outs=(), constants=()):
+    """One add or subtract of two values (other output columns included, e.g. net = gross - tax), or one value
+    times or divided by a number the description names (e.g. tax is 20% of gross)."""
     if not all(kind(want[i]) == "number" for i in idx):
         return []
-    numeric = [(e, v) for e, v in probed if all(kind(v[i]) == "number" for i in idx)]
+    numeric = [(e, v) for e, v in list(probed) + list(outs) if all(kind(v[i]) == "number" for i in idx)]
     found = []
     for (a, av), (b, bv) in product(numeric, numeric):
-        if a is b:
+        if a is b or ("out" in a and "out" in b):
             continue
         if all(equivalent(number(av[i]) - number(bv[i]), want[i]) for i in idx):
             found.append({"sub": [a, b]})
         if id(a) < id(b) and all(equivalent(number(av[i]) + number(bv[i]), want[i]) for i in idx):
             found.append({"add": [a, b]})
-    return found[:2]
+    for (e, v), k in product(numeric, constants):
+        factor = int(k) if k == int(k) else float(k)
+        if all(equivalent(number(v[i]) * k, want[i]) for i in idx):
+            found.append({"mul": [e, factor]})
+        elif all(equivalent(number(v[i]) / k, want[i]) for i in idx):
+            found.append({"div": [e, factor]})
+    direct = [e for e in found if '"out"' not in json.dumps(e)]
+    return (direct or found)[:3]  # other output columns only when nothing reading the input fits
 
 
 def literal(idx, want, private):
@@ -341,7 +362,8 @@ def explain(env, ctxs, target, column, lines, probed, private, mask):
         found = [e for e, v in probed if any(kind(v[i]) for i in idx) and all(equivalent(v[i], want[i]) for i in idx)]
         found += lookups(env, idx, want, target, column, iterated) + concats(probed, idx, want, private)
         if not found:
-            found += arithmetic(probed, idx, want)
+            outs = [({"out": other}, [row.get(other) for row in target]) for other in target[0] if other != column]
+            found += arithmetic(probed, idx, want, outs, env.get("rules", ()))
         found = [e for e in found if '"out"' not in json.dumps(e)] + literal(idx, want, private) + \
             [e for e in found if '"out"' in json.dumps(e)]  # anchors first, lookups through other columns last
         return found[:5]
@@ -378,6 +400,25 @@ def anchored(columns):
         if isinstance(common, list) and common and any(k.startswith("line ") for k in groups) and \
                 all(free(n["out"], (column,)) for e in common for n in walk(e) if "out" in n):
             columns[column] = {"all lines": common}
+    return columns
+
+
+def grounded(columns, rows, mask):
+    """Keep a candidate that reads other output columns only when those columns are themselves anchored in the
+    input. Otherwise (tax = gross - net and net = gross - tax) it is a cycle, and the column gets its examples."""
+    options = lambda column: [e for g in columns[column].values() if isinstance(g, list) for e in g]
+    anchored_, changed = set(), True
+    while changed:
+        changed = False
+        for column in columns:
+            if column not in anchored_ and any(all(n["out"] in anchored_ for n in walk(e) if "out" in n)
+                                               for e in options(column)):
+                anchored_.add(column)
+                changed = True
+    for column in set(columns) - anchored_:
+        want = [row.get(column) for row in rows]
+        columns[column] = {group: ({"examples": mask(examples(want, range(len(want))))} if isinstance(found, list) else found)
+                           for group, found in columns[column].items()}
     return columns
 
 
@@ -440,7 +481,7 @@ def masker(env, sources):
 
 def survey(env, outputs, expected, helpers, private, mask):
     """For each output: the iteration that fits, candidate expressions per column, and learned checks."""
-    view, checks, shapes, unexplained = {}, [], {}, {}
+    view, checks, shapes, unexplained, alternatives = {}, [], {}, {}, {}
     for key, out in outputs.items():
         rows = expected[key] if out["op"] == "append_rows" else list(expected[key].values())
         options = fits(env, len(rows)) if out["op"] == "append_rows" else [(key, False, 1)]
@@ -451,7 +492,8 @@ def survey(env, outputs, expected, helpers, private, mask):
                 continue
             iterated = ctxs[0]["table"] if ctxs else key
             probed = [(e, v) for e in simple_refs(env, iterated) if (v := probe(e, ctxs)) is not None]
-            columns = anchored({c: explain(env, ctxs, rows, c, shape[2], probed, private, mask) for c in out["columns"]})
+            columns = anchored(grounded({c: explain(env, ctxs, rows, c, shape[2], probed, private, mask)
+                                         for c in out["columns"]}, rows, mask))
             scored.append((explained(columns), shape, columns, ctxs))
         if not scored:
             view[key] = {"op": out["op"], "target_rows": len(rows), "fits": [], "columns": {}}
@@ -468,6 +510,9 @@ def survey(env, outputs, expected, helpers, private, mask):
                      "columns_explained": f"{score} of {len(out['columns'])}", "columns": columns}
         if out["op"] == "append_rows":
             view[key]["fits"] = [{"for_each": s[0], "only_linked": s[1], "lines": s[2]} for _, s, *_ in best]
+            view[key]["columns_are_for"] = view[key]["fits"][0]
+            # Each fit has its own verified candidates; the feedback uses the ones for the fit a plan chooses.
+            alternatives[key] = {fit_key(dict(zip(("for_each", "only_linked", "lines"), s))): c for _, s, c, _ in best}
         if helpers.get(key):
             view[key]["target_helper_columns_not_reproduced"] = helpers[key]
         checks += learn_checks(key, out["columns"], rows, shape[2])
@@ -482,15 +527,30 @@ def survey(env, outputs, expected, helpers, private, mask):
                 elif isinstance(found_, list) and found_ and all(e is not None and not isinstance(e, dict) for e in found_):
                     # Only a literal explains it: a constant of the output template (e.g. a debit flag), not input data.
                     checks.append({"table": key, "kind": "constant", "column": column, "line": line, "value": found_[0]})
-    return view, checks, shapes, unexplained
+    return view, checks, shapes, unexplained, alternatives
+
+
+def fit_key(step):
+    return json.dumps([step.get("for_each"), step.get("only_linked"), step.get("lines")])
+
+
+def evidence_for(plan, learned):
+    """Verified candidates per output column, for the iteration each append step of this plan chose."""
+    evidence = {o["table"]: o["columns"] for o in learned["profile"]["outputs"]}
+    for step in plan.get("steps", []) if isinstance(plan, dict) else []:
+        if isinstance(step, dict) and step.get("op") == "append_rows":
+            evidence[step.get("table")] = learned["alternatives"].get(step.get("table"), {}).get(fit_key(step), evidence.get(step.get("table")))
+    return evidence
 
 
 MISSING_STOP = "Stop: I will attach the source"
 
 
-def missing_sources(view, outputs, expected):
+def missing_sources(view, outputs, expected, context=""):
     """Output columns whose example values vary but no expression over the attached files reproduces any
-    of them: the file they come from was not given. Returns {table: [columns]}."""
+    of them: the file they come from was not given. A column the description names is left to the model,
+    which may build it from a rule there. Returns {table: [columns]}."""
+    described = f" {normalise(context)} "
     found = {}
     for key, item in view.items():
         rows = expected[key] if outputs[key]["op"] == "append_rows" else list(expected[key].values())
@@ -498,12 +558,14 @@ def missing_sources(view, outputs, expected):
             # ponytail: "varies" needs two distinct values, so a one-row output never asks; constants may be
             # template literals the model can write.
             varies = len({canon(row.get(column)) for row in rows} - {None}) > 1
+            if f" {normalise(column)} " in described:
+                continue
             if varies and not any(isinstance(g, list) and any(e is not None for e in g) for g in groups.values()):
                 found.setdefault(key, []).append(column)
     return found
 
 
-def learn(workbook, target, sources, answers):
+def learn(workbook, target, sources, answers, context=""):
     """Everything code can establish before the model is asked: outputs, evidence, candidates, checks."""
     found, questions = read_sources(workbook, sources)
     keys = table_keys(found)
@@ -518,6 +580,7 @@ def learn(workbook, target, sources, answers):
     spec["outputs"] = outputs
     env = environment(spec, bound, {})
     env["probe"] = True
+    env["rules"] = rule_numbers(context)
     names = link_evidence(env)
     if names:
         best = names[0]
@@ -530,10 +593,10 @@ def learn(workbook, target, sources, answers):
     first = survey(env, outputs, expected, helpers, set(), lambda value: value)[0]
     sources = {env["refs"][ref][0] for ref in env["refs"] if json.dumps(ref) in json.dumps(first)}
     mask, private = masker(env, sources)
-    view, checks, shapes, unexplained = survey(env, outputs, expected, helpers, private, mask)
+    view, checks, shapes, unexplained, alternatives = survey(env, outputs, expected, helpers, private, mask)
     for key in unexplained:
         del outputs[key], expected[key]
-    missing = missing_sources(view, outputs, expected)
+    missing = missing_sources(view, outputs, expected, context)
     if missing:
         listed = "; ".join(f"{key} ({', '.join(columns)})" for key, columns in missing.items())
         item = question("missing_source", f"The completed example holds values I cannot find in any attached file: {listed}. "
@@ -560,7 +623,7 @@ def learn(workbook, target, sources, answers):
                    "outputs": outputs}
     return {"spec": spec, "bound": bound, "expected": expected, "checks": checks,
             "fits": {key: item.get("fits", []) for key, item in view.items()},
-            "profile": profile, "schema_view": schema_view, "mask": mask, "questions": questions, "settled": settled,
+            "profile": profile, "schema_view": schema_view, "mask": mask, "alternatives": alternatives, "questions": questions, "settled": settled,
             "shapes": shapes}
 
 
@@ -644,7 +707,7 @@ def only_candidate(groups):
     whole = groups.get("all lines", groups.get("all rows"))
     if isinstance(whole, list):
         return (whole[0],) if len(whole) == 1 else None
-    lines = [groups[k] for k in sorted(groups, key=lambda k: int(k.split()[1])) if k.startswith("line ")]
+    lines = [groups[k] for k in sorted((k for k in groups if k.startswith("line ")), key=lambda k: int(k.split()[1]))]
     if lines and all(isinstance(g, list) and len(g) == 1 for g in lines):
         return ({"line": [g[0] for g in lines]},)
     return None
@@ -809,10 +872,11 @@ def build_workflow(workbook, target, sources, context, answers, client, events, 
     events.emit("run_start", phase="build", model=client.model, prompt_version=PROMPT_VERSION,
                 max_attempts=max_attempts, max_tokens_per_call=client.max_tokens)
     try:
-        learned = learn(workbook, target, sources, answers)
+        description = Path(context).read_text()
+        learned = learn(workbook, target, sources, answers, description)
         asked.update({q["id"]: q for q in learned["questions"] + learned["settled"]})
         if ask_until_settled(learned["questions"], answers, ask) != learned["questions"]:
-            learned = learn(workbook, target, sources, answers)
+            learned = learn(workbook, target, sources, answers, description)
         if learned["questions"]:
             return needs_input(events, learned["questions"])
         spec, mask = learned["spec"], learned["mask"]
@@ -859,7 +923,7 @@ def build_workflow(workbook, target, sources, context, answers, client, events, 
                     if reply.get("status") != "ready" or not isinstance(reply.get("workflow"), dict):
                         raise ValueError("Expected status ready with a workflow, or needs_input with a question.")
                     plan = normalise_plan(reply["workflow"])
-                    evidence = {o["table"]: o["columns"] for o in learned["profile"]["outputs"]}
+                    evidence = evidence_for(plan, learned)
                     unpaste(plan, evidence)
                     restored = restore(plan, locked)
                     adopted = adopt(plan, previous_plan, previous_wrong, evidence, learned["fits"])
@@ -889,7 +953,7 @@ def build_workflow(workbook, target, sources, context, answers, client, events, 
                     previous_wrong = {(d["table"], d.get("column")) for d in differences if d["table"] not in miscounted} | \
                         {(e["table"], e["column"]) for e in errors} | {(t, "row_count") for t in miscounted}
                     summary, error_lines = summarise(differences, plan, errors, learned["fits"],
-                                                     {o["table"]: o["columns"] for o in learned["profile"]["outputs"]})
+                                                     evidence_for(plan, learned))
                     feedback = {"differences": summary, "total_differences": len(differences)}
                     links = evidence_notes = link_notes(plan, env, learned["profile"]["links"], previous_wrong)
                     if links:

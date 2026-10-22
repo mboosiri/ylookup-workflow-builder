@@ -111,7 +111,7 @@ Private values (names, the fund, bank references, dates) are replaced by tokens 
 
 **Measured:** 30 of 30 unattended live builds on the generic code, each in 1–2 model calls (about
 $0.002), none needing code to adopt a candidate; see [design.md](docs/design.md#known-limitations).
-Re-measured on the current code (prompt v22, 22 October 2026): 9 of 9 across three descriptions
+Re-measured on prompt v22 (22 October 2026): 9 of 9 across three descriptions
 (the brief's, a one-line one and a fund manager's), 1–4 calls each, none asking a person; see the stress section below.
 A failed build saves nothing.
 
@@ -222,6 +222,38 @@ and keep it out of linked totals, and still check everything else.
 Offline, `tests/test_builder.py` and `tests/test_run.py` pin the same behaviours on a different template:
 the loop stops at the first match, an exhausted budget saves nothing, each attempt is told only its own
 differences, a clean job asks nothing, and an unclear payer is asked about, never guessed, and can be left unlinked.
+
+## Where the model matters
+
+On the brief's job the evidence is clear enough that a script taking the first verified candidate everywhere also
+builds it. The model earns its place where the example cannot decide, and where values need reading:
+
+```sh
+python scripts/model_matters.py --repeats 3
+```
+
+Each job is built by **code alone** (the first link rule, fit and candidate everywhere, resent five times so code's
+own fallbacks still apply) and by **the model**; the built workflow then runs on next month's input.
+Measured 22 October 2026 (prompt v23):
+
+| Job | Code alone | Model | Next month as the description says |
+|---|---|---|---|
+| Capital call (the brief's files) | ✅ builds | ✅ 3 of 3 (1–3 calls) | |
+| Test template: `Type` and `Account` are each verified only as a lookup of the other | ❌ out of calls | ✅ 3 of 3 (2 calls) | |
+| Paid in full, "partial names are fine" | ❌ out of calls | ✅ 3 of 3 (2–4 calls) | ✅ 3 of 3 run through a cut-short reference |
+| Paid in full, "full names only" (same files) | ❌ out of calls | ✅ 3 of 3 (3–4 calls) | ✅ 3 of 3 ask about the cut-short reference |
+| Payroll: "tax is 20% of gross, net is gross minus tax" | ✅ builds | ✅ 3 of 3 (1 call) | |
+
+- **Reading values:** in the test template no single candidate breaks the `Type` ↔ `Account` loop; the model sees
+  that the line labels are template constants.
+- **The description decides:** in the paid-in-full example every reference has the full name and everyone paid what
+  was called, so "full names only" and "partial names allowed" both fit it. Only the description tells them apart,
+  and the two descriptions give two different workflows. A description-blind script builds one at best.
+- **Rules from the description:** numbers the description names ("20%") become candidates (`gross × 0.2`), and another
+  output column can be an operand (`net = gross − tax`); code verifies them against every example row. Without such a
+  rule, a pair like tax and net (each the other's difference from gross) is a cycle, not evidence, and is asked about.
+
+`tests/test_model_matters.py` and `tests/test_rules.py` pin these offline.
 
 ## UI: chat
 

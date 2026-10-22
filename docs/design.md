@@ -143,6 +143,8 @@ It stores no cell addresses and no answer rows.
 | Link evidence goes back to the model before a person | Ask the person whenever the model asks | When a plan's link rule linked fewer rows than another rule does, the note says so and names the columns that link broke. A question that evidence may answer returns to the model once; the model asks people only about data, rules or policies, never how to write the plan. |
 | Ask when a number leaves the sign range the example showed | Post every computed value; a fixed threshold for "small gaps" | An overpayment or double payment gives a value the example never had. A question costs a person a click; a silent post could be wrong. |
 | Rows a person leaves unlinked are excused from link checks and listed for follow-up | Stop on every unlinked row | The customer leaves unmatched payments for later; the checks learned from linked rows do not apply to them, and the follow-up keeps them visible. |
+| Numbers the description names become verified candidates | Parse rules from English; let the model invent formulas | "Tax is 20% of gross" gives `gross × 0.2`, kept only if it reproduces every example row. Another output column can be an operand (net = gross − tax), but a pair that only explains itself (tax from net, net from tax) is dropped as a cycle. |
+| Candidates for every iteration that fits | Candidates for the first fit only | When two iterations fit (two partners, two statement lines), each has its own verified candidates; the feedback uses those for the fit the plan chose. Before this, the model chose the natural fit and got candidates for the other. |
 | Qwen3-30B-A3B | Mistral Small 3.2 24B | Mistral did not pass a full build in earlier testing. |
 | Mask private values before sending | Send raw data | Names, the fund, bank references and dates become tokens. Reference tables (over 50 rows, e.g. the chart) stay readable. |
 | CLI + a chat UI (Streamlit) | Tabbed forms; web app; notebook | Files and the description go in as chat messages; questions come back as messages; the trace streams live from `events.jsonl`. It reuses the CLI functions. |
@@ -188,3 +190,4 @@ It stores no cell addresses and no answer rows.
 1. A benchmark of several workflows and stress variants, scoring every prompt or code change by success rate and model calls.
 2. Several completed examples per build, to separate rules from coincidences in the learned checks.
 3. Formula recalculation, e.g. LibreOffice headless.
+4. Candidate search for longer formulas (several terms, rates taken from a table rather than the description).

@@ -3,7 +3,7 @@
 from datetime import datetime
 import json
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 
 OUTPUT = ["Entity", "Entry", "Line", "Posted", "Type", "Account", "Debit", "Amount", "Comment", "Bank", "Batch", "Partner", "Ref"]
@@ -123,3 +123,69 @@ def edit(path, *changes):
         book[sheet][cell] = value
     book.save(path)
     book.close()
+
+
+PAYROLL = "Each month I make a payslip for every employee: their name and gross pay, tax is 20% of gross, and net is gross minus tax."
+
+
+def payroll(folder, gross=(1000, 2500, 3200), context=PAYROLL):
+    """A payroll job, unrelated to the reconciliation: its rules are only in the description."""
+    source, target, notes = folder / "staff.xlsx", folder / "payslips.xlsx", folder / "notes.txt"
+    book = Workbook()
+    staff = book.active
+    staff.title = "Staff"
+    staff.append(["Emp ID", "Name", "Gross Pay"])
+    for n, amount in enumerate(gross, 1):
+        staff.append([f"E{n}", f"Person {n}", amount])
+    book.create_sheet("Payslip").append(["Employee", "Gross", "Tax", "Net"])
+    book.save(source)
+    for n, amount in enumerate(gross, 1):
+        book["Payslip"].append([f"Person {n}", amount, amount * 0.2, amount * 0.8])
+    book.save(target)
+    notes.write_text(context)
+    return source, target, notes
+
+
+def statement_of(*payments, currency="USD"):
+    """A statement with one dated deposit per (description, amount)."""
+    header = f"{'Date':<15}{'Description':<55}{'Withdrawal':>14}{'Deposit':>14}{'Balance':>14}"
+    lines, balance = [], 800
+    for description, amount in payments:
+        balance += amount
+        lines.append(f"{'24 Feb 2026':<15}{description:<55}{'':>14}{f'{amount:.2f}':>14}{f'{balance:.2f}':>14}")
+    return f"Currency : {currency}\n{header}\n" + "\n".join(lines) + "\n\n   Thank you for banking\n"
+
+
+PAID_IN_FULL = statement_of(("REF TAYLOR REED", 100), ("REF MORGAN VALE", 50))
+# Two descriptions of the same example. In it every reference has the full name and everyone paid exactly what
+# was called, so the example cannot tell "amount called" from "amount paid", nor "full names only" from
+# "partial names allowed". Only the description can.
+PARTIAL_OK = ("The bank references are often cut short, so I match each payment to a partner by full name or, if "
+              "needed, a partial name. I log what each partner actually paid according to the statement, and post two "
+              "balancing lines per partner for that amount.")
+FULL_ONLY = ("I match each payment to a partner by full name only; a reference with a partial name is not trusted and "
+             "is left for follow-up. I log what each partner actually paid according to the statement, and post two "
+             "balancing lines per partner for that amount.")
+# The next month: Taylor's reference is cut short. (A short payment would stop the run instead: in the
+# example every outstanding amount is 0, a value the learned checks hold to.)
+NEXT_MONTH = statement_of(("REF TAYLOR REE", 100), ("REF MORGAN VALE", 50))
+
+
+def paid_in_full(folder):
+    """The fixture job with a completed example in which every partner paid exactly what was called."""
+    source, target, bank, context = fixtures(folder)
+    book = load_workbook(source)
+    roster, stage, output = book["Roster"], book["Staging"], book["Import"]
+    for row, received in ((3, 100), (4, 50)):
+        roster.cell(row, 4, datetime(2026, 2, 24))
+        roster.cell(row, 5, received)
+        roster.cell(row, 6, 0)
+    for reference, name, amount in (("REF TAYLOR REED", "Taylor Reed", 100), ("REF MORGAN VALE", "Morgan Vale", 50)):
+        stage.append([datetime(2026, 2, 24), reference, amount, name])
+    for entry, name, amount in [(1, "Taylor Reed", 100), (2, "Morgan Vale", 50)]:
+        comment, paid = "Paid by " + name, datetime(2026, 2, 24)
+        output.append(["Example fund", entry, 1, paid, "Cash received", "CASH-CODE", "Y", amount, comment, "Example account", "General", None, entry * 2 - 1])
+        output.append(["Example fund", entry, 2, paid, "Due from partners", "RECEIVABLE-CODE", "N", amount, comment, None, "General", name, entry * 2])
+    book.save(target)
+    book.close()
+    return source, target, bank, context
