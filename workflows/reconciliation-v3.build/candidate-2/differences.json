@@ -1,0 +1,282 @@
+[
+  {
+    "table": "DIU",
+    "row": 1,
+    "column": "Allocation Rule",
+    "actual": null,
+    "expected": "Non-Dominant"
+  },
+  {
+    "table": "DIU",
+    "row": 1,
+    "column": "Is Debit",
+    "actual": null,
+    "expected": "Yes"
+  },
+  {
+    "table": "DIU",
+    "row": 2,
+    "column": "Allocation Rule",
+    "actual": null,
+    "expected": "User Provided"
+  },
+  {
+    "table": "DIU",
+    "row": 2,
+    "column": "Is Debit",
+    "actual": null,
+    "expected": "No"
+  },
+  {
+    "table": "DIU",
+    "row": 3,
+    "column": "Allocation Rule",
+    "actual": null,
+    "expected": "Non-Dominant"
+  },
+  {
+    "table": "DIU",
+    "row": 3,
+    "column": "Is Debit",
+    "actual": null,
+    "expected": "Yes"
+  },
+  {
+    "table": "DIU",
+    "row": 4,
+    "column": "Allocation Rule",
+    "actual": null,
+    "expected": "User Provided"
+  },
+  {
+    "table": "DIU",
+    "row": 4,
+    "column": "Is Debit",
+    "actual": null,
+    "expected": "No"
+  },
+  {
+    "table": "DIU",
+    "row": 5,
+    "column": "Allocation Rule",
+    "actual": null,
+    "expected": "Non-Dominant"
+  },
+  {
+    "table": "DIU",
+    "row": 5,
+    "column": "Is Debit",
+    "actual": null,
+    "expected": "Yes"
+  },
+  {
+    "table": "DIU",
+    "row": 6,
+    "column": "Allocation Rule",
+    "actual": null,
+    "expected": "User Provided"
+  },
+  {
+    "table": "DIU",
+    "row": 6,
+    "column": "Is Debit",
+    "actual": null,
+    "expected": "No"
+  },
+  {
+    "table": "DIU",
+    "row": 7,
+    "column": "Allocation Rule",
+    "actual": null,
+    "expected": "Non-Dominant"
+  },
+  {
+    "table": "DIU",
+    "row": 7,
+    "column": "Is Debit",
+    "actual": null,
+    "expected": "Yes"
+  },
+  {
+    "table": "DIU",
+    "row": 8,
+    "column": "Allocation Rule",
+    "actual": null,
+    "expected": "User Provided"
+  },
+  {
+    "table": "DIU",
+    "row": 8,
+    "column": "Is Debit",
+    "actual": null,
+    "expected": "No"
+  },
+  {
+    "table": "DIU",
+    "row": 9,
+    "column": "Allocation Rule",
+    "actual": null,
+    "expected": "Non-Dominant"
+  },
+  {
+    "table": "DIU",
+    "row": 9,
+    "column": "Is Debit",
+    "actual": null,
+    "expected": "Yes"
+  },
+  {
+    "table": "DIU",
+    "row": 10,
+    "column": "Allocation Rule",
+    "actual": null,
+    "expected": "User Provided"
+  },
+  {
+    "table": "DIU",
+    "row": 10,
+    "column": "Is Debit",
+    "actual": null,
+    "expected": "No"
+  },
+  {
+    "table": "DIU",
+    "row": 11,
+    "column": "Allocation Rule",
+    "actual": null,
+    "expected": "Non-Dominant"
+  },
+  {
+    "table": "DIU",
+    "row": 11,
+    "column": "Is Debit",
+    "actual": null,
+    "expected": "Yes"
+  },
+  {
+    "table": "DIU",
+    "row": 12,
+    "column": "Allocation Rule",
+    "actual": null,
+    "expected": "User Provided"
+  },
+  {
+    "table": "DIU",
+    "row": 12,
+    "column": "Is Debit",
+    "actual": null,
+    "expected": "No"
+  },
+  {
+    "table": "DIU",
+    "row": 13,
+    "column": "Allocation Rule",
+    "actual": null,
+    "expected": "Non-Dominant"
+  },
+  {
+    "table": "DIU",
+    "row": 13,
+    "column": "Is Debit",
+    "actual": null,
+    "expected": "Yes"
+  },
+  {
+    "table": "DIU",
+    "row": 14,
+    "column": "Allocation Rule",
+    "actual": null,
+    "expected": "User Provided"
+  },
+  {
+    "table": "DIU",
+    "row": 14,
+    "column": "Is Debit",
+    "actual": null,
+    "expected": "No"
+  },
+  {
+    "table": "DIU",
+    "row": 15,
+    "column": "Allocation Rule",
+    "actual": null,
+    "expected": "Non-Dominant"
+  },
+  {
+    "table": "DIU",
+    "row": 15,
+    "column": "Is Debit",
+    "actual": null,
+    "expected": "Yes"
+  },
+  {
+    "table": "DIU",
+    "row": 16,
+    "column": "Allocation Rule",
+    "actual": null,
+    "expected": "User Provided"
+  },
+  {
+    "table": "DIU",
+    "row": 16,
+    "column": "Is Debit",
+    "actual": null,
+    "expected": "No"
+  },
+  {
+    "table": "DIU",
+    "row": 17,
+    "column": "Allocation Rule",
+    "actual": null,
+    "expected": "Non-Dominant"
+  },
+  {
+    "table": "DIU",
+    "row": 17,
+    "column": "Is Debit",
+    "actual": null,
+    "expected": "Yes"
+  },
+  {
+    "table": "DIU",
+    "row": 18,
+    "column": "Allocation Rule",
+    "actual": null,
+    "expected": "User Provided"
+  },
+  {
+    "table": "DIU",
+    "row": 18,
+    "column": "Is Debit",
+    "actual": null,
+    "expected": "No"
+  },
+  {
+    "table": "DIU",
+    "row": 19,
+    "column": "Allocation Rule",
+    "actual": null,
+    "expected": "Non-Dominant"
+  },
+  {
+    "table": "DIU",
+    "row": 19,
+    "column": "Is Debit",
+    "actual": null,
+    "expected": "Yes"
+  },
+  {
+    "table": "DIU",
+    "row": 20,
+    "column": "Allocation Rule",
+    "actual": null,
+    "expected": "User Provided"
+  },
+  {
+    "table": "DIU",
+    "row": 20,
+    "column": "Is Debit",
+    "actual": null,
+    "expected": "No"
+  }
+]

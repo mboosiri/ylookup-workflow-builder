@@ -1,0 +1,437 @@
+{
+  "customer_context": "First, I pull the bank statement into a sheet. Then, I figure out who each payment is from. The bank references are a mess \u2014 sometimes the name is truncated or split up. I match using full names if possible, or partial names if needed. If I can't match it, I leave it blank to chase up later.\n\nNext, I log what they paid versus what they owe. Finally, I build the upload file. In accounting, every transaction requires two balancing lines: one showing cash came in, and one showing the investor owes us less. I look up the correct account codes, link the lines, and ensure the totals tie out.\n",
+  "recorded_answers": [
+    {
+      "question": "BS-Test-4 is in EUR but Capital Call Tracker states its amounts in USD. How should the amounts be posted?",
+      "answer": "Post the amounts as they are, without FX conversion"
+    }
+  ],
+  "input_tables": [
+    {
+      "table": "Capital Call Tracker",
+      "records": 10,
+      "columns": {
+        "ID": "text",
+        "Subscription": "text",
+        "Investor": "text",
+        "Commitment": "number",
+        "% Ownership": "number",
+        "Fee": "number",
+        "Expenses": "number",
+        "Investment": "number",
+        "Call #7 - Total Call": "number",
+        "Cumulative Capital Contributions (Prior)": "number",
+        "Cumulative Capital Contributions (Current)": "number",
+        "Unfunded Balance (Prior)": "number",
+        "Unfunded Balance (Current)": "number",
+        "Date as per bank statement": "blank",
+        "Amount Received": "blank",
+        "Amount outstanding": "blank"
+      },
+      "units": {
+        "Commitment": "USD",
+        "Fee": "USD",
+        "Expenses": "USD",
+        "Investment": "USD",
+        "Call #7 - Total Call": "USD",
+        "Cumulative Capital Contributions (Prior)": "USD",
+        "Cumulative Capital Contributions (Current)": "USD",
+        "Unfunded Balance (Prior)": "USD",
+        "Unfunded Balance (Current)": "USD",
+        "Amount Received": "USD",
+        "Amount outstanding": "USD"
+      }
+    },
+    {
+      "table": "PCS Chart of Accounts (Global)",
+      "records": 557,
+      "columns": {
+        "Account Type": "text",
+        "GL Account Code": "text",
+        "GL Account": "text",
+        "Trans Type": "text"
+      }
+    },
+    {
+      "table": "Investors",
+      "records": 1,
+      "columns": {
+        "Legal Entity": "text",
+        "Legal Entity Domain": "text",
+        "Deal": "text",
+        "Position": "text",
+        "Batch Type": "text",
+        "Bank Account": "text",
+        "Investor": "blank"
+      }
+    },
+    {
+      "table": "BS-Test-4",
+      "records": 2,
+      "columns": {
+        "Date": "date",
+        "Description": "text",
+        "Withdrawal": "blank",
+        "Deposit": "number",
+        "Balance": "number"
+      },
+      "units": {
+        "Deposit": "EUR",
+        "Balance": "EUR"
+      }
+    }
+  ],
+  "links": [
+    {
+      "table": "BS-Test-4",
+      "text": "Description",
+      "to": "Capital Call Tracker",
+      "name": "Investor",
+      "rows": 2,
+      "linked_full_name_only": 0,
+      "linked_full_or_unique_prefix": 2
+    }
+  ],
+  "outputs": [
+    {
+      "table": "Bank Statement Staging",
+      "op": "append_rows",
+      "target_rows": 2,
+      "columns_explained": "5 of 5",
+      "columns": {
+        "Date": {
+          "all rows": [
+            {
+              "col": "BS-Test-4.Date"
+            }
+          ]
+        },
+        "Line Item Description": {
+          "all rows": [
+            {
+              "col": "BS-Test-4.Description"
+            }
+          ]
+        },
+        "Withdrawal": {
+          "all rows": [
+            null
+          ]
+        },
+        "Deposit": {
+          "all rows": [
+            {
+              "col": "BS-Test-4.Deposit"
+            }
+          ]
+        },
+        "Matched Investor": {
+          "all rows": [
+            {
+              "col": "Capital Call Tracker.Investor"
+            }
+          ]
+        }
+      },
+      "fits": [
+        {
+          "for_each": "BS-Test-4",
+          "only_linked": false,
+          "lines": 1
+        },
+        {
+          "for_each": "BS-Test-4",
+          "only_linked": true,
+          "lines": 1
+        },
+        {
+          "for_each": "Capital Call Tracker",
+          "only_linked": true,
+          "lines": 1
+        }
+      ]
+    },
+    {
+      "table": "Capital Call Tracker",
+      "op": "fill_columns",
+      "target_rows": 10,
+      "columns_explained": "3 of 3",
+      "columns": {
+        "Date as per bank statement": {
+          "all rows": [
+            {
+              "first": "BS-Test-4.Date"
+            }
+          ]
+        },
+        "Amount Received": {
+          "all rows": [
+            {
+              "sum": "BS-Test-4.Deposit"
+            }
+          ]
+        },
+        "Amount outstanding": {
+          "all rows": [
+            {
+              "sub": [
+                {
+                  "col": "Capital Call Tracker.Call #7 - Total Call"
+                },
+                {
+                  "sum": "BS-Test-4.Deposit"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "target_helper_columns_not_reproduced": [
+        "First Prefix",
+        "Second Prefix"
+      ]
+    },
+    {
+      "table": "DIU",
+      "op": "append_rows",
+      "target_rows": 20,
+      "columns_explained": "26 of 26",
+      "columns": {
+        "Legal Entity": {
+          "all lines": [
+            {
+              "col": "Investors.Legal Entity"
+            }
+          ]
+        },
+        "Legal Entity Domain": {
+          "all lines": [
+            {
+              "col": "Investors.Legal Entity Domain"
+            }
+          ]
+        },
+        "Deal": {
+          "all lines": [
+            {
+              "col": "Investors.Deal"
+            }
+          ]
+        },
+        "Position": {
+          "all lines": [
+            {
+              "col": "Investors.Position"
+            }
+          ]
+        },
+        "Batch Index": {
+          "all lines": [
+            1
+          ]
+        },
+        "Batch Type": {
+          "all lines": [
+            {
+              "col": "Investors.Batch Type"
+            }
+          ]
+        },
+        "JE Index": {
+          "all lines": [
+            {
+              "var": "entry"
+            }
+          ]
+        },
+        "Trans Index": {
+          "all lines": [
+            {
+              "var": "line"
+            }
+          ]
+        },
+        "GL Date": {
+          "all lines": [
+            {
+              "first": "BS-Test-4.Date"
+            }
+          ]
+        },
+        "Effective Date": {
+          "all lines": [
+            {
+              "first": "BS-Test-4.Date"
+            }
+          ]
+        },
+        "Transaction Currency": {
+          "all lines": [
+            {
+              "unit": "Capital Call Tracker.Commitment"
+            },
+            "USD"
+          ]
+        },
+        "Allocation Rule": {
+          "line 1": [
+            "Non-Dominant"
+          ],
+          "line 2": [
+            "User Provided"
+          ]
+        },
+        "Transaction Type": {
+          "line 1": [
+            {
+              "concat": [
+                "Cash - Received - ",
+                {
+                  "unit": "Capital Call Tracker.Commitment"
+                }
+              ]
+            },
+            "Cash - Received - USD"
+          ],
+          "line 2": [
+            "Due From Investors"
+          ]
+        },
+        "Account": {
+          "all lines": [
+            {
+              "lookup": {
+                "table": "PCS Chart of Accounts (Global)",
+                "where": "Trans Type",
+                "equals": {
+                  "out": "Transaction Type"
+                },
+                "return": "GL Account Code"
+              }
+            }
+          ]
+        },
+        "Is Debit": {
+          "line 1": [
+            "Yes"
+          ],
+          "line 2": [
+            "No"
+          ]
+        },
+        "Amount (Local)": {
+          "all lines": [
+            {
+              "sum": "BS-Test-4.Deposit"
+            }
+          ]
+        },
+        "Amount (LE)": {
+          "all lines": [
+            {
+              "sum": "BS-Test-4.Deposit"
+            }
+          ]
+        },
+        "Transaction Comments": {
+          "all lines": [
+            {
+              "concat": [
+                "Capital Call Received from ",
+                {
+                  "col": "Capital Call Tracker.Investor"
+                }
+              ]
+            }
+          ]
+        },
+        "Batch Comments": {
+          "all lines": [
+            {
+              "concat": [
+                "Capital Call Received from ",
+                {
+                  "col": "Capital Call Tracker.Investor"
+                }
+              ]
+            }
+          ]
+        },
+        "Bank Account": {
+          "line 1": [
+            {
+              "col": "Investors.Bank Account"
+            }
+          ],
+          "line 2": [
+            null
+          ]
+        },
+        "Investor": {
+          "line 1": [
+            null
+          ],
+          "line 2": [
+            {
+              "col": "Capital Call Tracker.Investor"
+            }
+          ]
+        },
+        "Investor Domain": {
+          "all lines": [
+            null
+          ]
+        },
+        "Vehicle": {
+          "line 1": [
+            null
+          ],
+          "line 2": [
+            {
+              "col": "Investors.Legal Entity"
+            }
+          ]
+        },
+        "Investor Amount (LE)": {
+          "line 1": [
+            null
+          ],
+          "line 2": [
+            {
+              "sum": "BS-Test-4.Deposit"
+            }
+          ]
+        },
+        "Investor Amount (Local)": {
+          "line 1": [
+            null
+          ],
+          "line 2": [
+            {
+              "sum": "BS-Test-4.Deposit"
+            }
+          ]
+        },
+        "Transaction GL Reference": {
+          "all lines": [
+            {
+              "var": "row"
+            }
+          ]
+        }
+      },
+      "fits": [
+        {
+          "for_each": "Capital Call Tracker",
+          "only_linked": false,
+          "lines": 2
+        }
+      ]
+    }
+  ],
+  "target_changes_not_reproduced": {
+    "Capital Call Tracker@23": [
+      "To select from drop down"
+    ]
+  }
+}

@@ -30,6 +30,7 @@ the strict `DIU` upload tab comes out. Nothing in the code refers to either.
 | Model and why | Above; [design decisions](docs/design.md#main-design-decisions) |
 | `.env.example` | [.env.example](.env.example) |
 | The generated workflow | [workflows/reconciliation-v3.json](workflows/reconciliation-v3.json) |
+| The build that generated it (iterations, differences, what the model saw) | [workflows/reconciliation-v3.build/](workflows/reconciliation-v3.build/) |
 | Sequence diagram: a new input through the saved workflow | [design.md](docs/design.md#how-a-saved-workflow-produces-the-output) (also build and adapt) |
 | Assumptions | [design.md](docs/design.md#assumptions) |
 | With more time | [design.md](docs/design.md#with-more-time) |
@@ -115,6 +116,11 @@ Re-measured on the current code (prompt v22, 22 October 2026): 9 of 9 across thr
 A failed build saves nothing.
 
 The generated workflow for this case is committed at [workflows/reconciliation-v3.json](workflows/reconciliation-v3.json).
+The build that produced it is next to it in [workflows/reconciliation-v3.build/](workflows/reconciliation-v3.build/):
+`events.jsonl` (every model call, plan, comparison and code step), `evidence.json` (the masked evidence the
+model saw) and each attempt's `plan.json` and `differences.json`. Attempts 1 and 2 each differed from the
+example in 40 cells; code then adopted the only verified expression for two columns the model kept
+getting wrong, and attempt 3 matched.
 
 ## Phase 2: Run
 
