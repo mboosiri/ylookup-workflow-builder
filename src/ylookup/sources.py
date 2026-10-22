@@ -1,4 +1,4 @@
-"""General source tools: header-row tables in a workbook, a bank statement PDF, name matching.
+"""General source tools: header-row tables in workbooks, dated tables in PDFs, name matching.
 
 No business vocabulary lives here. A table is whatever a workbook header row says it is; which
 tables and columns matter is learned by the builder and stored in the workflow.

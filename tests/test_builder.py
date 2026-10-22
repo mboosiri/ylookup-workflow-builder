@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -8,8 +9,8 @@ from unittest.mock import patch
 
 from openpyxl import load_workbook
 
-from ylookup.builder import build_workflow, guess_roles, learn, reply_schema
-from ylookup.events import Events
+from ylookup.builder import adopt, build_workflow, guess_roles, learn, only_candidate, reply_schema
+from ylookup.events import Events, run_name
 from ylookup.planner import run_workflow, validate_plan
 from fixtures import PRIVATE, FakeModel, fixture_plan, fixtures, pages, statement
 
@@ -255,6 +256,21 @@ class BuildTest(unittest.TestCase):
             onward, client = build([asked], {item["id"]: "Build anyway"}, "onward")
             self.assertEqual((onward["status"], len(client.messages)), ("needs_input", 1))
             self.assertIn("Build anyway", client.messages[0][1]["content"])
+
+    def test_a_column_the_example_leaves_blank_is_adopted_when_the_model_repeats_a_value(self):
+        self.assertEqual(only_candidate({"all lines": [None]}), (None,))
+        self.assertIsNone(only_candidate({"all lines": [None, "x"]}))
+        stubborn = {"steps": [{"op": "append_rows", "table": "T", "columns": {"Domain": {"col": "F.Domain"}}}]}
+        again = copy.deepcopy(stubborn)
+        adopted = adopt(again, stubborn, {("T", "Domain")}, {"T": {"Domain": {"all lines": [None]}}}, {})
+        self.assertEqual((adopted, again["steps"][0]["columns"]["Domain"]), (["T.Domain"], None))
+
+    def test_commands_started_together_get_their_own_folders(self):
+        names = set()
+        for _ in range(3):  # within one second, like a script looping over stress files
+            names.add(run_name("run"))
+            time.sleep(0.001)
+        self.assertEqual(len(names), 3)
 
     def test_a_job_without_a_bank_statement_still_learns_its_outputs(self):
         with TemporaryDirectory() as directory:

@@ -17,7 +17,7 @@ import streamlit as st
 
 from ylookup.adapt import PROMPT_VERSION as ADAPT_PROMPT_VERSION, adapt_workflow
 from ylookup.builder import MAX_ATTEMPTS, PROMPT_VERSION, build_workflow, guess_roles
-from ylookup.events import Events
+from ylookup.events import Events, run_name
 from ylookup.model import OpenRouter, settings
 
 RUNS = Path("runs")
@@ -26,9 +26,12 @@ TYPES = ["xlsx", "xlsm", "pdf", "txt", "md", "json"]
 WELCOME = ("**1 · Attach** the input workbook, a completed example of the same job, and any source files (PDF or workbook).  \n"
            "**2 · Describe** the job in a sentence or two, then say **build**.  \n"
            "**3 · Run** the saved workflow on a new input; if its layout changed, I adapt it.")
-# The sample job of this repository, offered as one click when its files are present. UI convenience only.
-SAMPLE = [Path("data/import-capital-call-notice-diu-input.xlsx"), Path("data/import-capital-call-notice-diu-output.xlsx"),
-          Path("data/BS-Test-4.pdf"), Path("examples/reconciliation-context.txt")]
+# The sample job of this repository, offered as one click when its files are present (the brief's names or
+# the names they were supplied under). UI convenience only; the builder never sees these names.
+SAMPLE = next((files for files in (
+    [Path("data/capital-call-input.xlsx"), Path("data/capital-call-output.xlsx"), Path("data/bank-statement.pdf")],
+    [Path("data/import-capital-call-notice-diu-input.xlsx"), Path("data/import-capital-call-notice-diu-output.xlsx"),
+     Path("data/BS-Test-4.pdf")]) if all(p.exists() for p in files)), []) + [Path("examples/reconciliation-context.txt")]
 OFF_TOPIC_REPLY = "I can only learn and run spreadsheet workflows, so I left that out of the job description."
 ASSISTANT, USER = ":material/smart_toy:", ":material/person:"
 ICONS = {"input": ":material/input:", "completed example": ":material/task_alt:", "source": ":material/description:",
@@ -190,7 +193,7 @@ def client(prompt_version, tokens):
 def build():
     s, r = state(), roles()
     model_client, key = client(PROMPT_VERSION, 8000)
-    run_dir = RUNS / time.strftime("chat-build-%Y%m%d-%H%M%S")
+    run_dir = RUNS / run_name("chat-build")
     events = Events(run_dir, (key,))
     (run_dir / "context.txt").write_text(description())
     s.last_build = (r["input"], r["target"])
@@ -207,7 +210,7 @@ def run():
     s, r = state(), roles()
     workbook = run_input()
     sources = [p for p in r["sources"] if p != workbook]
-    run_dir = RUNS / time.strftime("chat-run-%Y%m%d-%H%M%S")
+    run_dir = RUNS / run_name("chat-run")
     s.folder.mkdir(parents=True, exist_ok=True)
     context = s.folder / f"context-{time.strftime('%H%M%S')}.txt"
     context.write_text(description())
@@ -421,7 +424,7 @@ with st.sidebar:
 for message in s.messages:
     with st.chat_message(message["role"], avatar=ASSISTANT if message["role"] == "assistant" else USER):
         st.markdown(message["text"])
-        if message["text"] == WELCOME and not s.files and all(p.exists() for p in SAMPLE):
+        if message["text"] == WELCOME and not s.files and len(SAMPLE) == 4 and all(p.exists() for p in SAMPLE):
             if st.button("Try the sample job", icon=":material/play_arrow:"):
                 add(SAMPLE)
                 st.rerun()

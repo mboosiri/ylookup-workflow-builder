@@ -7,12 +7,11 @@ import json
 import os
 from pathlib import Path
 import sys
-import time
 
 from openpyxl import load_workbook
 
 from .adapt import PROMPT_VERSION as ADAPT_PROMPT_VERSION, adapt_workflow
-from .events import Events
+from .events import Events, run_name
 from .model import OpenRouter, settings
 from .builder import MAX_ATTEMPTS, PROMPT_VERSION as BUILD_PROMPT_VERSION, build_workflow
 from .planner import run_workflow
@@ -115,7 +114,7 @@ def main() -> None:
         script = Path(__file__).with_name("ui.py")
         os.execvp(sys.executable, [sys.executable, "-m", "streamlit", "run", str(script)])
     if args.command != "inspect" and args.run_dir is None:
-        args.run_dir = Path("runs") / f"{args.command}-{time.strftime('%Y%m%d-%H%M%S')}"
+        args.run_dir = Path("runs") / run_name(args.command)
     try:
         if args.command == "inspect":
             result = inspect_workbook(args.workbook)

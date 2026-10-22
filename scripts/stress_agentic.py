@@ -4,7 +4,7 @@ Builds the workflow N times (calls, iterated or not), then adapts the committed 
 stress variant N times and records whether it asked. Expectations are about the kind of variation,
 never about values. Needs OPENROUTER_API_KEY; costs about $0.002 per build.
 
-Usage: python scripts/stress_variants.py data/import-capital-call-notice-diu-input.xlsx
+Usage: python scripts/stress_variants.py data/capital-call-input.xlsx
        python scripts/stress_agentic.py [--repeats 3]
 """
 
@@ -21,8 +21,10 @@ from ylookup.model import OpenRouter, settings
 from ylookup.sources import LEAVE
 
 DATA, STRESS = Path("data"), Path("data/stress")
-INPUT, TARGET = DATA / "import-capital-call-notice-diu-input.xlsx", DATA / "import-capital-call-notice-diu-output.xlsx"
-SOURCES = [DATA / "BS-Test-4.pdf"]
+pick = lambda *names: next((DATA / n for n in names if (DATA / n).exists()), DATA / names[0])  # the brief's names, or ours
+INPUT = pick("capital-call-input.xlsx", "import-capital-call-notice-diu-input.xlsx")
+TARGET = pick("capital-call-output.xlsx", "import-capital-call-notice-diu-output.xlsx")
+SOURCES = [pick("bank-statement.pdf", "BS-Test-4.pdf")]
 CONTEXT, ANSWERS = Path("examples/reconciliation-context.txt"), Path("examples/answers.json")
 WORKFLOW = Path("workflows/reconciliation-v3.json")
 # What a careful builder does with each kind of variation: "ask", "either" (ask or map correctly), "quiet" (no question).

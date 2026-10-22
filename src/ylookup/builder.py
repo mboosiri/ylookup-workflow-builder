@@ -632,20 +632,21 @@ def adopt(plan, previous, wrong, evidence, fits):
         for column, expression in step["columns"].items():
             key = (step.get("table"), column)
             verified = only_candidate(evidence.get(key[0], {}).get(column, {}))
-            if key in wrong and before.get(key) == expression and verified is not None and verified != expression:
-                step["columns"][column] = verified
+            if key in wrong and before.get(key) == expression and verified and verified[0] != expression:
+                step["columns"][column] = verified[0]
                 adopted.append(f"{key[0]}.{column}")
     return adopted
 
 
 def only_candidate(groups):
-    """The one verified expression for a column: a single all-lines candidate, or one candidate per line."""
+    """The one verified expression for a column, as a 1-tuple (it may be null: a column the example leaves
+    blank), from a single all-lines candidate or one candidate per line; None when there is no single one."""
     whole = groups.get("all lines", groups.get("all rows"))
     if isinstance(whole, list):
-        return whole[0] if len(whole) == 1 else None
+        return (whole[0],) if len(whole) == 1 else None
     lines = [groups[k] for k in sorted(groups, key=lambda k: int(k.split()[1])) if k.startswith("line ")]
     if lines and all(isinstance(g, list) and len(g) == 1 for g in lines):
-        return {"line": [g[0] for g in lines]}
+        return ({"line": [g[0] for g in lines]},)
     return None
 
 

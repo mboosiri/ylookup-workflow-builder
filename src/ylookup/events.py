@@ -1,8 +1,14 @@
 """Local observable events; no credentials or calendar-date logging."""
 
+from datetime import datetime
 import json
 from pathlib import Path
 import re
+
+
+def run_name(prefix):
+    """A folder name for one command: readable time plus microseconds, so commands started together never collide."""
+    return f"{prefix}-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}"
 
 
 def redact(text, secrets=()):

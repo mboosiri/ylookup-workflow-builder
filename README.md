@@ -22,6 +22,19 @@ the strict `DIU` upload tab comes out. Nothing in the code refers to either.
 - **Design, diagrams, assumptions and limitations:** [docs/design.md](docs/design.md)
 - **Progress tracker:** [docs/tasks.md](docs/tasks.md)
 
+**Submission checklist**
+
+| Item | Where |
+|---|---|
+| How to run the three steps | [Phase 1: Build](#phase-1-build), [Phase 2: Run](#phase-2-run), [Phase 3: Adapt](#phase-3-adapt-stress-test) |
+| Model and why | Above; [design decisions](docs/design.md#main-design-decisions) |
+| `.env.example` | [.env.example](.env.example) |
+| The generated workflow | [workflows/reconciliation-v3.json](workflows/reconciliation-v3.json) |
+| Sequence diagram: a new input through the saved workflow | [design.md](docs/design.md#how-a-saved-workflow-produces-the-output) (also build and adapt) |
+| Assumptions | [design.md](docs/design.md#assumptions) |
+| With more time | [design.md](docs/design.md#with-more-time) |
+| Main design decisions and alternatives | [design.md](docs/design.md#main-design-decisions) |
+
 ## Setup
 
 Python 3.11+.
@@ -33,13 +46,18 @@ cp .env.example .env        # then set OPENROUTER_API_KEY
 python -m unittest discover -s tests
 ```
 
-Put the supplied files in `data/` (git-ignored):
+Put the supplied files in `data/` (git-ignored). The commands below use the brief's names; any names
+work, because roles come from the content and tables are found by their headers:
 
 | File | Purpose |
 |---|---|
-| `data/import-capital-call-notice-diu-input.xlsx` | input |
-| `data/import-capital-call-notice-diu-output.xlsx` | completed target (Phase 1 only) |
-| `data/BS-Test-4.pdf` | a source: the bank statement (`--sources` takes any workbooks or PDFs) |
+| `data/capital-call-input.xlsx` | input |
+| `data/capital-call-output.xlsx` | completed target (Phase 1 only) |
+| `data/bank-statement.pdf` | a source: the bank statement (`--sources` takes any workbooks or PDFs) |
+
+A PDF's table is named after its file. The committed workflow was built from `BS-Test-4.pdf`, so its
+expressions say `BS-Test-4.Deposit`; it still binds to `bank-statement.pdf` by its headers, and the run
+reports the rename.
 
 The context is [examples/reconciliation-context.txt](examples/reconciliation-context.txt): the
 customer's description from the brief, word for word, and nothing else.
@@ -63,9 +81,9 @@ again. Answers about one input's data (a blank cell, an unmatched payment) are k
 
 ```sh
 ylookup build \
-  --input   data/import-capital-call-notice-diu-input.xlsx \
-  --target  data/import-capital-call-notice-diu-output.xlsx \
-  --sources data/BS-Test-4.pdf \
+  --input   data/capital-call-input.xlsx \
+  --target  data/capital-call-output.xlsx \
+  --sources data/bank-statement.pdf \
   --context examples/reconciliation-context.txt
 ```
 
@@ -103,8 +121,8 @@ The generated workflow for this case is committed at [workflows/reconciliation-v
 ```sh
 ylookup run \
   --workflow workflows/reconciliation-v3.json \
-  --input    data/import-capital-call-notice-diu-input.xlsx \
-  --sources  data/BS-Test-4.pdf
+  --input    data/capital-call-input.xlsx \
+  --sources  data/bank-statement.pdf
 ```
 
 The run uses no target, no build transcript and no model call. It finds each table by its header
@@ -124,12 +142,12 @@ The sign range is learned per column from the example; workflows built before th
 ## Phase 3: Adapt (stress test)
 
 ```sh
-python scripts/stress_variants.py data/import-capital-call-notice-diu-input.xlsx   # writes data/stress/*.xlsx
+python scripts/stress_variants.py data/capital-call-input.xlsx   # writes data/stress/*.xlsx
 
 ylookup adapt \
   --workflow workflows/reconciliation-v3.json \
   --input    data/stress/constants-renamed.xlsx \
-  --sources  data/BS-Test-4.pdf \
+  --sources  data/bank-statement.pdf \
   --context  examples/reconciliation-context.txt
 ```
 
@@ -169,7 +187,7 @@ Two behaviours, scored live on the given files. Expectations are per kind of var
 a doubtful variant should ask (else it **guessed**), a harmless one should not (else it **over-asked**).
 
 ```sh
-python scripts/stress_variants.py data/import-capital-call-notice-diu-input.xlsx
+python scripts/stress_variants.py data/capital-call-input.xlsx
 python scripts/stress_agentic.py --repeats 3      # writes runs/stress-agentic-<time>/scores.json
 ```
 

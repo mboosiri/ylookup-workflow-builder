@@ -1,6 +1,6 @@
 """Write Phase 3 stress variants of the input workbook to data/stress/, keeping Excel's cached formula results.
 
-Usage: python scripts/stress_variants.py data/import-capital-call-notice-diu-input.xlsx
+Usage: python scripts/stress_variants.py data/capital-call-input.xlsx
 """
 
 from pathlib import Path
