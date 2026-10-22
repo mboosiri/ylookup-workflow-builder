@@ -101,6 +101,7 @@ class RunTest(unittest.TestCase):
                 link = [q for q in asked["questions"] if q["code"] == "link"]
                 self.assertEqual(len(link), 1)
                 self.assertIn(LEAVE, link[0]["options"])
+                self.assertIn(f'reads "{description} MORE WRAPPED REFERENCE"', link[0]["question"])  # what a person decides from
                 self.assertFalse((self.folder / name / "output.xlsx").exists())
                 # Leaving it for follow-up is a valid answer: the learned checks excuse that row's link columns.
                 with patch("ylookup.sources.pdf_pages", return_value=pages(statement(description=description))):
@@ -110,6 +111,11 @@ class RunTest(unittest.TestCase):
                 book = load_workbook(left["output"], data_only=True)
                 self.assertEqual([c.value for c in book["Staging"][2]], [book["Staging"]["A2"].value, book["Staging"]["B2"].value, 95, None])
                 self.assertEqual(book["Import"]["H3"].value, 0)  # nobody was credited with the unlinked payment
+                left_rows = [f for f in left["follow_up"] if "left_unlinked" in f]
+                self.assertEqual(len(left_rows), 1)
+                self.assertEqual((left_rows[0]["table"], left_rows[0]["to"]), ("bank", "Roster"))
+                self.assertIn("Deposit 95.00", left_rows[0]["left_unlinked"][0]["row"])
+                self.assertTrue(left_rows[0]["left_unlinked"][0]["text"].startswith(description))
                 book.close()
 
     def test_an_output_table_that_already_has_rows_stops_instead_of_being_overwritten(self):

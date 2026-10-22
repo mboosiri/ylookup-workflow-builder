@@ -12,7 +12,7 @@ import re
 
 from .events import Events
 from .sources import (answered, bind_tables, binding_changes, canon, equivalent, kind, link_rows, money, number,
-                      question, read_sources)
+                      question, read_sources, row_summary, row_text)
 from .workbook import compare_outputs, plain, read_outputs, write_outputs
 
 
@@ -351,7 +351,7 @@ def unit_questions(env, source, target):
 
 def run_link(env, source, text_, target, name, policy):
     result = link_rows(env["tables"][source], text_, env["tables"][target], name, policy, env["answers"], source, target)
-    env["links"][source] = {"to": target, "rows": result["rows"], "left": result["left"]}
+    env["links"][source] = {"to": target, "rows": result["rows"], "left": result["left"], "text": text_}
     env["linked"][target] = {"from": source, "records": result["records"], "name": name}
     for item in result["questions"] + [q for q in unit_questions(env, source, target) if answered(q, env["answers"]) is None]:
         env["questions"][item["id"]] = item
@@ -572,6 +572,11 @@ def follow_up(plan, outputs, env):
                     unlinked += 1
             if differs or unlinked:
                 report.append({"table": step["table"], "column": column, "differs": differs, "nothing_linked": unlinked})
+    for source, link in env["links"].items():  # rows a person chose to leave unlinked are still to be placed
+        rows = env["tables"][source]["records"]
+        left = [{"row": row_summary(rows[i], link["text"]), "text": row_text(rows[i], link["text"], 60)} for i in sorted(link["left"])]
+        if left:
+            report.append({"table": source, "left_unlinked": left, "to": link["to"]})
     return report
 
 

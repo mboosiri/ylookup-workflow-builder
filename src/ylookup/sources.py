@@ -450,6 +450,17 @@ def match_names(description, names, policy="full_or_unique_prefix"):
 LEAVE = "Leave it unlinked for follow-up"
 
 
+def row_summary(row, text):
+    """A source row's other values, short: how a person tells it apart (also the stable part of its question id)."""
+    return ", ".join(f"{k} {canon(v)}" for k, v in row["values"].items() if k != text and kind(v))[:120]
+
+
+def row_text(row, text, limit=120):
+    """The row's own text (e.g. a payment reference), shortened: what a person reads to decide."""
+    value = " ".join(str(row["values"].get(text) or "").split())
+    return value if len(value) <= limit else value[:limit - 1] + "…"
+
+
 def link_rows(source, text, target, name, policy, answers, source_key="rows", target_key="records"):
     """Link each row of one table to one record of another whose name its text contains.
 
@@ -467,9 +478,10 @@ def link_rows(source, text, target, name, policy, answers, source_key="rows", ta
         found, method = match_names(value, names, policy) if isinstance(value, str) else ([], "full_name")
         record = found[0] if len(found) == 1 else None
         if record is None:
-            summary = ", ".join(f"{k} {canon(v)}" for k, v in row["values"].items() if k != text and kind(v))[:120]
-            item = question("link", f"Which {target_key} does this {source_key} row belong to ({summary})? "
-                            f"{'No' if not found else len(found)} {name} {'value matches' if not found else 'values match'} its {text}.",
+            summary = row_summary(row, text)
+            item = question("link", f"Which {target_key} does this {source_key} row belong to ({summary})? Its {text} reads "
+                            f"\"{row_text(row, text)}\". "
+                            f"{'No' if not found else len(found)} {name} {'value matches' if not found else 'values match'} it.",
                             summary, options=[display[i] for i in (found or names)] + [LEAVE], row=row["row"], method=method)
             reply = answered(item, answers)
             if reply is None:

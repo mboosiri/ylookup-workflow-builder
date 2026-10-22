@@ -84,7 +84,7 @@ class ChatTest(unittest.TestCase):
             app, _, _ = self.chat(root, found, "make an image or illustration out of this, please, using every row in it",
                                   files=[found["input"], found["target"]])
             self.assertEqual(app.session_state.description, [])
-            self.assertIn("I can't make that", app.session_state.messages[-1]["text"])
+            self.assertIn("I can only learn and run spreadsheet workflows", app.session_state.messages[-1]["text"])
             self.assertFalse(list(root.glob("chat-build-*")))
 
     def test_a_lone_workbook_or_two_unrelated_ones_are_described_honestly(self):

@@ -23,12 +23,16 @@ from ylookup.model import OpenRouter, settings
 RUNS = Path("runs")
 UPLOADS = Path("data/uploads")
 TYPES = ["xlsx", "xlsm", "pdf", "txt", "md", "json"]
-WELCOME = ("Attach the files of a job: the input workbook, a completed example of the same job, and any other "
-           "sources such as a bank statement PDF. Then tell me, in your own words, how the job is done. "
-           "I work out which file is which, learn the workflow, and ask when something is unclear. "
-           "To use a workflow later, attach it with a new or changed input and say **run**.")
-OFF_TOPIC_REPLY = ("I can't make that. I only learn spreadsheet workflows from an input workbook, a completed example "
-                   "and your description of the job, then run them on new inputs. I left that message out of the job description.")
+WELCOME = ("**1 · Attach** the input workbook, a completed example of the same job, and any source files (PDF or workbook).  \n"
+           "**2 · Describe** the job in a sentence or two, then say **build**.  \n"
+           "**3 · Run** the saved workflow on a new input; if its layout changed, I adapt it.")
+# The sample job of this repository, offered as one click when its files are present. UI convenience only.
+SAMPLE = [Path("data/import-capital-call-notice-diu-input.xlsx"), Path("data/import-capital-call-notice-diu-output.xlsx"),
+          Path("data/BS-Test-4.pdf"), Path("examples/reconciliation-context.txt")]
+OFF_TOPIC_REPLY = "I can only learn and run spreadsheet workflows, so I left that out of the job description."
+ASSISTANT, USER = ":material/smart_toy:", ":material/person:"
+ICONS = {"input": ":material/input:", "completed example": ":material/task_alt:", "source": ":material/description:",
+         "workflow": ":material/account_tree:", "description": ":material/notes:", "new input": ":material/fiber_new:"}
 # ponytail: a word list, not a classifier; it catches requests for things the builder never makes.
 # "draw"/"drawing" are left out on purpose (capital drawdowns). Ask the model if real chats slip past it.
 OFF_TOPIC = {"image", "images", "illustration", "illustrations", "picture", "pictures", "photo", "photos", "video",
@@ -99,11 +103,30 @@ def unpaired(r):
 
 def role_of(path, r):
     if path == r["input"] and unpaired(r):
-        return "a workbook: the input or the completed example (I can tell once I have the other one)"
-    return ("a new input for the workflow" if path in r["new_inputs"] else "the input" if path == r["input"]
-            else "the completed example" if path == r["target"]
-            else "a source" if path in r["sources"] else "a saved workflow" if path in r["workflows"]
-            else "the description" if path in r["context"] else "not used")
+        return "workbook: the input or the completed example (attach the other to tell)"
+    return ("new input" if path in r["new_inputs"] else "input" if path == r["input"]
+            else "completed example" if path == r["target"]
+            else "source" if path in r["sources"] else "workflow" if path in r["workflows"]
+            else "description" if path in r["context"] else "not used")
+
+
+def file_lines(paths, r, bullet="- "):
+    """One line per file: an icon for its role, its name, its role."""
+    lines = []
+    for path in paths:
+        role = role_of(path, r)
+        icon = ICONS.get(role, ":material/table:" if role.startswith("workbook") else ":material/block:")
+        lines.append(f"{bullet}{icon} `{path.name}` · {role}")
+    return ("\n" if bullet else "  \n").join(lines)
+
+
+def add(paths):
+    """Add files to the conversation and say what each one is."""
+    s = state()
+    added = [p for p in paths if p not in s.files]
+    s.files += added
+    s.messages.append({"role": "user", "text": "📎 " + ", ".join(f"`{p.name}`" for p in added)})
+    say(f"Read {len(added)} file{'s' if len(added) != 1 else ''}:\n" + file_lines(added, roles()) + "\n\n" + next_step())
 
 
 def next_step():
@@ -207,7 +230,21 @@ def events(run_dir):
     return found
 
 
+DOT, OK, BAD, ASK = ":gray[⏺]", ":green[✓]", ":red[✗]", ":orange[?]"
+
+
 def describe(event):
+    line = describe_text(event)
+    if not line:
+        return None
+    name, status = event["event"], event.get("status")
+    mark = (OK if (name == "comparison" and status == "pass") or (name == "run_end" and status == "success")
+            else BAD if name in ("validation", "model_error") or (name == "comparison") or (name == "run_end" and status != "needs_input")
+            else ASK if name == "inquiry" or (name == "run_end" and status == "needs_input") else DOT)
+    return f"{mark} {line}"
+
+
+def describe_text(event):
     name = event["event"]
     if name == "run_start":
         return {"build": "Reading every file and comparing the input with the completed example",
@@ -215,7 +252,7 @@ def describe(event):
     if name == "learned":
         outputs = "; ".join(f"`{k}` {'gets new rows' if v['op'] == 'append_rows' else 'gets ' + str(len(v['columns'])) + ' columns filled'}"
                             for k, v in event["outputs"].items())
-        return f"Learned what the job produces: {outputs}. {event['checks']} conventions to check on every run"
+        return f"Learned what the job produces: {outputs}. {event['checks']} checks to run every time"
     if name == "model_request":
         return f"Model call {event['attempt']}: composing the plan from that evidence"
     if name == "candidate":
@@ -224,7 +261,7 @@ def describe(event):
         return f"Code rejected the plan: {event.get('validation_error', '')[:200]}"
     if name == "comparison":
         if event["status"] == "pass":
-            return "Output matches the completed example ✓"
+            return "Output matches the completed example"
         wrong = Counter(d.get("column") or d.get("check") for d in event["differences"])
         return f"{len(event['differences'])} cells differ from the example: " + ", ".join(f"{c} ({n})" for c, n in wrong.most_common(5))
     if name == "locked_fields":
@@ -242,14 +279,14 @@ def describe(event):
         return "A model call failed; " + ("retrying" if event.get("retrying") else "giving up")
     if name == "run_end":
         status = event.get("status")
-        return {"success": "Done ✓", "needs_input": "Needs an answer", "budget_exhausted": "Out of model calls",
+        return {"success": "Done", "needs_input": "Needs an answer", "budget_exhausted": "Out of model calls",
                 "stopped": "Stopped: " + str(event.get("reason", ""))[:200]}.get(status, status)
     return None
 
 
 def show_trace(run_dir):
     lines = [line for line in map(describe, events(run_dir)) if line]
-    st.markdown("\n".join(f"- {line}" for line in lines) or "Starting…")
+    st.caption("  \n".join(lines) or "Starting…")
 
 
 def show_build(result):
@@ -299,11 +336,18 @@ def follow_up_text(result):
     """What a person may want to chase after a run, from the run's own computed differences."""
     lines = []
     for item in result.get("follow_up", []):
-        parts = [f"{d['record']} ({d['value']})" for d in item["differs"]]
+        if "left_unlinked" in item:
+            count = len(item["left_unlinked"])
+            lines.append(f"\n`{item['table']}`: {count} row{'s' if count != 1 else ''} left unlinked to `{item['to']}`, still to place:")
+            lines += [f"- {row['row']} · \"{row['text']}\"" for row in item["left_unlinked"]]
+            continue
+        lines.append(f"\n`{item['column']}` in `{item['table']}`:")
+        if item["differs"]:
+            lines.append("- not zero after their linked rows: " + ", ".join(f"{d['record']} ({d['value']})" for d in item["differs"]))
         if item["nothing_linked"]:
-            parts.append(f"{item['nothing_linked']} with nothing linked")
-        lines.append(f"- `{item['table']}.{item['column']}` is not zero for " + ", ".join(parts))
-    return "\n\nTo follow up:\n" + "\n".join(lines) if lines else ""
+            records = f"{item['nothing_linked']} record{'s' if item['nothing_linked'] != 1 else ''}"
+            lines.append(f"- no matching row found: {records}, so `{item['column']}` is still their full amount")
+    return "\n\n**To follow up**\n\n" + "\n".join(lines) if lines else ""
 
 
 def finish(job):
@@ -321,14 +365,14 @@ def finish(job):
     if job["kind"] == "build" and status == "success":
         s.workflow = Path(result["workflow"])
         s.built_from = {Path(p) for p in result["files"]}
-        text = (f"Learned the workflow in {result['attempts']} model call{'s' if result['attempts'] > 1 else ''} and checked "
-                "it against the example. To use it, attach a new or changed input and say **run**.")
+        text = (f":green[✓] Learned the workflow in {result['attempts']} model call{'s' if result['attempts'] > 1 else ''} and "
+                "checked it against the example. To use it, attach a new or changed input and say **run**.")
     elif job["kind"] == "run" and status == "success":
         if result.get("adapted"):
             s.workflow = Path(result["workflow"])
-            text = f"The input's layout changed, so I adapted the workflow to version {result['workflow_version']} and re-ran every check."
+            text = f":green[✓] The input's layout changed, so I adapted the workflow to version {result['workflow_version']} and re-ran every check."
         else:
-            text = "Ran the workflow: " + ", ".join(f"`{k}` {v} rows" for k, v in result.get("rows", {}).items()) + "."
+            text = ":green[✓] Ran the workflow: " + ", ".join(f"`{k}` {v} rows" for k, v in result.get("rows", {}).items()) + "."
         text += follow_up_text(result)
     elif status == "needs_input":
         text = ("I need these answered before I can finish:\n" + "\n".join(f"- {q['question']}" for q in result.get("questions", []))
@@ -342,32 +386,32 @@ def finish(job):
 
 # --- page --------------------------------------------------------------------------------------------
 
-st.set_page_config(page_title="Ylookup workflow builder", layout="centered")
+st.set_page_config(page_title="Ylookup workflow builder", page_icon=":material/smart_toy:", layout="centered")
 st.title("Ylookup workflow builder")
+st.caption("Learns a spreadsheet job from one worked example, then repeats it on new files.")
 s = state()
 
 with st.sidebar:
     try:
-        st.success(f"Model `{settings()[1]}`")
+        st.caption(f":material/smart_toy: `{settings()[1]}`")
     except ValueError as error:
         st.error(str(error))
+    r = roles()
+    done = lambda ok, label: f"{':green[✓]' if ok else ':gray[○]'} {label}"
+    st.markdown("  \n".join([done(bool(r["input"] and r["target"]) or bool(s.workflow and run_input()), "Files"),
+                             done(len(description().split()) >= 15 or bool(s.workflow), "Description"),
+                             done(bool(s.workflow), "Workflow")]))
     local = sorted(p for folder in ("data", "examples", "workflows") for p in Path(folder).glob("**/*")
                    if p.suffix.lower().lstrip(".") in TYPES and not p.name.startswith("~$") and UPLOADS not in p.parents)
     with st.form("local-files"):
-        picked = st.multiselect("Add files already on this machine", local, format_func=str, key=f"local-{len(s.files)}")
+        picked = st.multiselect("Files on this machine", local, format_func=str, key=f"local-{len(s.files)}")
         add_files = st.form_submit_button("Add to the conversation")
     if picked and add_files:
-        added = [p for p in picked if p not in s.files]
-        s.files += added
-        s.messages.append({"role": "user", "text": "📎 " + ", ".join(f"`{p.name}`" for p in added)})
-        current = roles()
-        say("I read the files:\n" + "\n".join(f"- `{p.name}`: {role_of(p, current)}" for p in added) + "\n\n" + next_step())
+        add(picked)
         st.rerun()
     if s.files:
-        st.caption("Files in this conversation")
-        current = roles()
-        for path in s.files:
-            st.write(f"`{path.name}` · {role_of(path, current)}")
+        st.caption("In this conversation")
+        st.markdown(file_lines(s.files, roles(), bullet=""))
     if s.workflow:
         st.caption(f"Current workflow: `{s.workflow}`")
     if st.button("New conversation"):
@@ -375,8 +419,12 @@ with st.sidebar:
         st.rerun()
 
 for message in s.messages:
-    with st.chat_message(message["role"]):
+    with st.chat_message(message["role"], avatar=ASSISTANT if message["role"] == "assistant" else USER):
         st.markdown(message["text"])
+        if message["text"] == WELCOME and not s.files and all(p.exists() for p in SAMPLE):
+            if st.button("Try the sample job", icon=":material/play_arrow:"):
+                add(SAMPLE)
+                st.rerun()
         if message.get("run_dir"):
             with st.expander("Trace"):
                 show_trace(message["run_dir"])
@@ -389,12 +437,13 @@ def live():
     job = state().job
     if job is None:
         return
-    with st.chat_message("assistant"):
-        with st.status("Waiting for your answer" if job["pending"] else "Working…", expanded=True):
+    with st.chat_message("assistant", avatar=ASSISTANT):
+        busy = {"build": "Building…", "run": "Running…"}.get(job["kind"], "Working…")
+        with st.status("Waiting for your answer" if job["pending"] else busy, expanded=True):
             show_trace(job["run_dir"])
         current = next((q for q in job["pending"] if q["id"] not in job["collected"]), None)
         if current:
-            st.markdown(f"**{current['question']}**")
+            st.markdown(f":orange[**Question**]  \n{current['question']}")
             for option in current.get("options") or []:
                 if st.button(option, key=f"opt-{current['id']}-{option}"):
                     answer(job, current, option)
@@ -433,7 +482,7 @@ if submitted:
         else:
             current = roles()
             if new:
-                say("I read the files:\n" + "\n".join(f"- `{p.name}`: {role_of(p, current)}" for p in new)
+                say(f"Read {len(new)} file{'s' if len(new) != 1 else ''}:\n" + file_lines(new, current)
                     + "".join(f"\n- I could not tell: {q['question']}" for q in current["questions"]))
             asked = intent(text)
             if asked == "description":

@@ -114,6 +114,8 @@ Verified result: 20 DIU rows and 0 differences from the completed target.
 After a run, the result lists what to follow up: records where a computed difference between a record's own
 value and a total over its linked rows is not zero (here `Amount outstanding`: Aaron Patel 5.00, Daniel Brooks
 20.00, and 8 investors with no payment linked). It reads only the plan's formulas and the run's values.
+Source rows a person chose to leave unlinked are listed too, with their own text, so money that was not
+placed is not forgotten. A link question shows that text as well ("Its Description reads …").
 
 A computed number whose sign the completed example never showed (e.g. a negative `Amount outstanding` after an
 overpayment or a double payment) is a question, not a silent post: post it as computed, or stop for a person.
@@ -215,6 +217,9 @@ One chat page. Attach files to a message (or add files already in `data/` from t
    changed, it adapts the workflow and shows each remapped column and who decided it.
 
 Each result has its downloads (`workflow.json`, `output.xlsx`) and the full trace. The UI calls the same functions as the CLI.
+When the sample files are in `data/`, **Try the sample job** adds all four in one click. After a run, the chat
+lists what to follow up. The sidebar shows the files with their roles and a ✓/○ checklist (files, description,
+workflow). The theme lives in `.streamlit/config.toml`; start the UI from the repo root to pick it up.
 
 ## Outputs
 
