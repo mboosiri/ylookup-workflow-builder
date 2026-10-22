@@ -117,6 +117,16 @@ class PdfTableTest(unittest.TestCase):
         self.assertEqual(len(table["records"]), 1)
         self.assertEqual([q["code"] for q in questions], ["source_row"])
 
+    def test_amounts_in_another_form_ask_instead_of_joining_the_text(self):
+        for amount in ("€95.00", "EUR 95.00", "1.095,00", "1,095", "95.00 CR", "(95.00)"):
+            with self.subTest(amount=amount):
+                table, questions = pdf_table(statement(amount=amount))
+                self.assertEqual([q["code"] for q in questions], ["source_amount"])
+                self.assertNotIn(amount, table["records"][0]["cells"][1])
+        table, questions = pdf_table(statement(description="INV 2026  REF 12345"))
+        self.assertEqual(questions, [])
+        self.assertEqual(table["records"][0]["cells"][1], "INV 2026 REF 12345 MORE WRAPPED REFERENCE")
+
 
 class LinkTest(unittest.TestCase):
     def table(self, column, *values):

@@ -38,3 +38,13 @@
 - [ ] ⏳ **A03** Inputs without cached formula results (recalculate instead of asking for each value).
 - [ ] ⏳ **M01** Benchmark of several workflows and variants, scored per prompt or code change.
 - [ ] ⏳ **M02** Several completed examples per build, to separate rules from coincidences in learned checks.
+
+## Testing handover — 22 October 2026
+
+- Direct chat attachments verified with a saved workflow, XLSX input and PDF source: 20 DIU rows, 0 differences from the completed target.
+- Fixed chat runs dropping XLSX sources when PDFs were present, or excluding build-time XLSX sources; regression covers both combinations.
+- Sidebar selection and Add are submitted together in a form; verified one-click addition in the browser.
+- Each chat upload submission gets its own folder, preserving earlier files when a later input has the same name.
+- Live model build/adapt measurements from the previous session have not been repeated in this handover. OCR, formula recalculation, broader benchmarks and multiple training examples remain later work.
+- Chat routing: commands are short messages matched as whole words; the pasted customer description is kept even when it says "build" or "truncated"; out-of-scope requests (images, videos…) are declined and not stored as the description. `tests/test_ui.py`.
+- PDF amounts not written as `1,234.56` (symbols, CR/DR, brackets, `1.234,56`) now ask a question instead of joining the description text. `test_amounts_in_another_form_ask_instead_of_joining_the_text`; `BS-Test-4.pdf` still reads 2 rows with no questions.

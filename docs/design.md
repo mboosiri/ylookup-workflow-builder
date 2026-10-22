@@ -146,10 +146,14 @@ It stores no cell addresses and no answer rows.
 ## Assumptions
 
 - EUR statement amounts are posted as USD amounts without FX, as the target does. This is a person's recorded answer, not a rule in code.
-- One header row per table; the table ends at the first blank row. Units rows (e.g. `USD`) sit between header and records.
+- One header row per table (at least two distinct text cells); the table ends at the first blank row. A sheet scan stops after 50 blank rows. Units rows (e.g. `USD`) sit between header and records.
 - The record key is the first column with distinct text (an ID or a name).
 - Appended output tables are empty in the input; filled columns are empty in the records.
-- A PDF table has a text layer, a header line of labels, rows that start with a date, and ends at a blank line. Column names are read, not assumed.
+- A PDF table has a text layer, a header line of at least three word labels, rows that start with a date, and ends at a blank line. Column names are read, not assumed.
+- PDF dates are `12 Mar 2026`, `12 March 2026`, `2026-03-12`, `12/03/2026`, `12.03.2026` or `Mar 12, 2026`; slash and dot dates are read day first. A row starting with another form is not read as a row (if it holds amounts, a question is asked).
+- PDF amounts are written `1,234.56`. An amount in another form (`€95.00`, `95.00 CR`, `(95.00)`, `1.234,56`, `1,095`) becomes a question; it is never parsed or added to the row's text.
+- A currency question is asked only when both sides carry a label: a `Currency: EUR` / `CCY: EUR` line in the PDF and a three-letter units row under the workbook header. Without both, amounts are posted as they are.
+- In the chat, a command is a short message naming it (`build`, `run it`); longer text is the job's description, even when it uses those words. Requests for things the builder does not make (images, videos, poems…) are declined by a word list and not added to the description.
 - The input was saved by Excel, so formula results are cached.
 - A completed example shows every convention it relies on; one example can make a coincidence look like a rule (see limitations).
 

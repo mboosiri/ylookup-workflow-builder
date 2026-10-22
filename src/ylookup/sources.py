@@ -312,6 +312,9 @@ def binding_changes(spec, bound):
 DATE_FORMATS = ["%d %b %Y", "%d %B %Y", "%Y-%m-%d", "%d/%m/%Y", "%d.%m.%Y", "%b %d, %Y"]
 DATE = re.compile(r"^\s*(\d{1,2} [A-Za-z]{3,9} \d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}[/.]\d{1,2}[/.]\d{4}|[A-Za-z]{3} \d{1,2}, \d{4})(?=\s|$)")
 MONEY = re.compile(r"^-?\d[\d,]*\.\d{2}$")
+# ponytail: amounts in any other form (symbol, code, CR/DR, brackets, 1.234,56, no cents) are not parsed but
+# asked about, so they never vanish into the row's text. Extend the code list if statements use others.
+AMOUNT_LIKE = re.compile(r"^[-+(]?(?:[€$£¥]|(?:EUR|USD|GBP|CHF|JPY|SGD) )?\s?-?\d[\d.,' ]*\)?(?: ?(?:CR|DR|-))?$")
 UNIT = re.compile(r"\b(?:Currency|CCY)\s*:\s*([A-Z]{3})\b")
 
 
@@ -380,6 +383,9 @@ def pdf_tables(pages, name):
                             issues.append(question("source_layout", f"Two values fall under '{header[column][0]}' in {where}; "
                                                    "nothing will be guessed.", where))
                         values[column] = Decimal(piece.replace(",", ""))
+                    elif AMOUNT_LIKE.match(piece) and not piece.isdigit():
+                        issues.append(question("source_amount", f"'{piece}' in {where} looks like an amount but is not "
+                                               "written as 1,234.56; nothing will be guessed.", where))
                     else:
                         values[text_column] = piece if values[text_column] is None else f"{values[text_column]} {piece}"
                 current = {"row": page_number * 1000 + number, "cells": values, "formulas": [None] * len(header),

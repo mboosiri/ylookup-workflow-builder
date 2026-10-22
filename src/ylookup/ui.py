@@ -9,6 +9,7 @@ from collections import Counter
 import json
 from pathlib import Path
 import queue
+import re
 import threading
 import time
 
@@ -26,6 +27,29 @@ WELCOME = ("Attach the files of a job: the input workbook, a completed example o
            "sources such as a bank statement PDF. Then tell me, in your own words, how the job is done. "
            "I work out which file is which, learn the workflow, and ask when something is unclear. "
            "To use a workflow later, attach it with a new or changed input and say **run**.")
+OFF_TOPIC_REPLY = ("I can't make that. I only learn spreadsheet workflows from an input workbook, a completed example "
+                   "and your description of the job, then run them on new inputs. I left that message out of the job description.")
+# ponytail: a word list, not a classifier; it catches requests for things the builder never makes.
+# "draw"/"drawing" are left out on purpose (capital drawdowns). Ask the model if real chats slip past it.
+OFF_TOPIC = {"image", "images", "illustration", "illustrations", "picture", "pictures", "photo", "photos", "video",
+             "videos", "poem", "song", "logo", "cartoon", "painting", "sketch"}
+
+
+def intent(text):
+    """What a chat message is: "build", "run", "off_topic", "description", or None when it has no words.
+
+    A command is a short message naming it ("build", "run it", "please adapt"); longer text is the job's
+    description even when it uses those words ("Finally, I build the upload file").
+    """
+    words = re.findall(r"[a-z]+", text.lower())
+    if not words:
+        return None
+    if OFF_TOPIC & set(words):
+        return "off_topic"
+    command = next((w for w in words if w in ("build", "run", "adapt")), None)
+    if command and len(words) <= 4:
+        return "build" if command == "build" else "run"
+    return "description"
 
 
 # --- state ----------------------------------------------------------------------------------------
@@ -148,8 +172,7 @@ def build():
 def run():
     s, r = state(), roles()
     workbook = run_input()
-    sources = [p for p in r["sources"] if p != workbook and p.suffix.lower() == ".pdf"] or \
-              [p for p in r["sources"] if p != workbook and p not in s.built_from]
+    sources = [p for p in r["sources"] if p != workbook]
     run_dir = RUNS / time.strftime("chat-run-%Y%m%d-%H%M%S")
     s.folder.mkdir(parents=True, exist_ok=True)
     context = s.folder / f"context-{time.strftime('%H%M%S')}.txt"
@@ -301,8 +324,10 @@ with st.sidebar:
         st.error(str(error))
     local = sorted(p for folder in ("data", "examples", "workflows") for p in Path(folder).glob("**/*")
                    if p.suffix.lower().lstrip(".") in TYPES and not p.name.startswith("~$") and UPLOADS not in p.parents)
-    picked = st.multiselect("Add files already on this machine", local, format_func=str, key=f"local-{len(s.files)}")
-    if picked and st.button("Add to the conversation"):
+    with st.form("local-files"):
+        picked = st.multiselect("Add files already on this machine", local, format_func=str, key=f"local-{len(s.files)}")
+        add_files = st.form_submit_button("Add to the conversation")
+    if picked and add_files:
         added = [p for p in picked if p not in s.files]
         s.files += added
         s.messages.append({"role": "user", "text": "📎 " + ", ".join(f"`{p.name}`" for p in added)})
@@ -358,9 +383,10 @@ submitted = st.chat_input("Message, or attach files", accept_file="multiple", fi
 if submitted:
     text = (submitted.text or "").strip()
     new = []
+    upload_folder = s.folder / str(time.time_ns())
     for upload in submitted.files or []:
-        s.folder.mkdir(parents=True, exist_ok=True)
-        path = s.folder / upload.name
+        upload_folder.mkdir(parents=True, exist_ok=True)
+        path = upload_folder / Path(upload.name).name
         path.write_bytes(upload.getvalue())
         if path not in s.files:
             s.files.append(path)
@@ -380,15 +406,17 @@ if submitted:
             if new:
                 say("I read the files:\n" + "\n".join(f"- `{p.name}`: {role_of(p, current)}" for p in new)
                     + "".join(f"\n- I could not tell: {q['question']}" for q in current["questions"]))
-            command = text.lower()
-            if text and not any(word in command.split() for word in ("build", "run", "adapt")):
+            asked = intent(text)
+            if asked == "description":
                 s.description.append(text)
             can_build = current["input"] and current["target"]
-            if "build" in command and can_build:
+            if asked == "off_topic":
+                say(OFF_TOPIC_REPLY + "\n\n" + next_step())
+            elif asked == "build" and can_build:
                 build()
-            elif any(word in command for word in ("run", "adapt")) and current["workflows"] and run_input():
+            elif asked == "run" and current["workflows"] and run_input():
                 run()
-            elif can_build and text and len(description().split()) >= 15 and (current["input"], current["target"]) != s.last_build:
+            elif asked == "description" and can_build and len(description().split()) >= 15 and (current["input"], current["target"]) != s.last_build:
                 build()  # the description just became complete: start learning
             else:
                 say(next_step())
