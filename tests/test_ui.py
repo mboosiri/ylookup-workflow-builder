@@ -87,6 +87,17 @@ class ChatTest(unittest.TestCase):
             self.assertIn("I can't make that", app.session_state.messages[-1]["text"])
             self.assertFalse(list(root.glob("chat-build-*")))
 
+    def test_a_lone_workbook_or_two_unrelated_ones_are_described_honestly(self):
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            lone, pdf = root / "book.xlsx", root / "statement.pdf"
+            app, _, _ = self.chat(root, self.roles(root, input=lone, sources=[pdf]), "hello", files=[lone, pdf])
+            self.assertIn("Attach the other workbook", app.session_state.messages[-1]["text"])
+            self.assertIn("the input or the completed example", "".join(m.value for m in app.sidebar.markdown))
+            first, second = root / "a.xlsx", root / "b.xlsx"
+            app, _, _ = self.chat(root, self.roles(root, sources=[first, second]), "hello", files=[first, second])
+            self.assertIn("cannot tell which is the completed example", app.session_state.messages[-1]["text"])
+
     def test_short_commands_still_work(self):
         with TemporaryDirectory() as folder:
             root = Path(folder)

@@ -167,6 +167,7 @@ It stores no cell addresses and no answer rows.
   repairs were added, 1/5 to 10/10. A failed build saves nothing.
 - **Adapt is conservative.** On an empty renamed column (`Value Date`) or two similar numeric
   columns, the model often asks instead of mapping; a person answers at the prompt.
+- **Missing sources are asked about, not guessed.** Before any model call, an output column whose example values vary but that no expression over the attached files reproduces is listed in one question: attach the file they come from, or build anyway. A one-row output or a constant column never triggers it.
 - **Rows left unlinked by a person** are excused from checks on columns whose expression names the linked table, and from linked totals. A lookup that reads such a column through another output column is not traced.
 - **Learned checks come from one example.** A convention that holds by coincidence in the target becomes a check. More examples would remove such false rules; today they can only make a run stop, never write a wrong value.
 - **Candidate search is bounded:** single references, lookups keyed by another output column, a prefix/suffix concatenation of one reference, and one add/subtract.

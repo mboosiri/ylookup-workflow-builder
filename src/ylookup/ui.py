@@ -92,7 +92,14 @@ def description():
     return "\n\n".join(texts + s.description).strip()
 
 
+def unpaired(r):
+    """A lone workbook with nothing to compare it to: it may be the input or the completed example."""
+    return r["input"] and not r["target"] and not r["workflows"]
+
+
 def role_of(path, r):
+    if path == r["input"] and unpaired(r):
+        return "a workbook: the input or the completed example (I can tell once I have the other one)"
     return ("a new input for the workflow" if path in r["new_inputs"] else "the input" if path == r["input"]
             else "the completed example" if path == r["target"]
             else "a source" if path in r["sources"] else "a saved workflow" if path in r["workflows"]
@@ -111,8 +118,12 @@ def next_step():
         return f"Say **run** to run the workflow on `{run_input().name}`; if its layout changed I adapt the workflow."
     if r["workflows"]:
         return "Attach an input workbook to run the workflow on."
-    if r["input"] and not r["target"]:
-        return "Attach a completed example of the same job so I can learn from it, or a saved workflow to run."
+    if unpaired(r):
+        return ("Attach the other workbook of the job (the input, or the same job completed) so I can compare them, "
+                "or a saved workflow to run.")
+    if sum(p.suffix.lower() in (".xlsx", ".xlsm") for p in r["sources"]) >= 2:
+        return ("None of these workbooks adds rows or fills columns compared with another, so I cannot tell which is "
+                "the completed example. Attach the same job completed.")
     return "Attach the input workbook and a completed example of the same job."
 
 
@@ -287,7 +298,13 @@ def download(label, path):
 def finish(job):
     s, result = state(), job["result"] or {}
     if job["error"]:
-        say(f"That failed: {job['error']}", run_dir=str(job["run_dir"]))
+        if job["error"].startswith("Stopped by a recorded answer"):
+            # A stop is a decision for this attempt, not a policy: forget it so the next build can ask again.
+            s.answers = {k: v for k, v in s.answers.items() if not str(v.get("answer", "")).startswith("Stop")}
+            s.last_build = None
+            say("Stopped as you chose. When you are ready, attach any missing file and say **build**.", run_dir=str(job["run_dir"]))
+        else:
+            say(f"That failed: {job['error']}", run_dir=str(job["run_dir"]))
         return
     status = result.get("status")
     if job["kind"] == "build" and status == "success":

@@ -102,6 +102,14 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(recorded[0]["question"], question["question"])
         self.assertEqual(recorded[0]["answer"], "Yes, keep them")
 
+    def test_a_model_question_reaches_the_person_with_real_values_not_tokens(self):
+        tokened = {"status": "needs_input", "workflow": None, "question": "Is V_1 the payer?",
+                   "options": ["V_1", "V_2"]}
+        asked = []
+        self.build([tokened], ask=lambda items: asked.extend(items) or {})
+        shown = json.dumps(asked[0]["question"]) + json.dumps(asked[0]["options"])
+        self.assertNotRegex(shown, r"\bV_\d+\b")
+
     def test_without_a_person_questions_stop_with_ids_an_answers_file_can_settle(self):
         blocked, client, events, _ = self.build([], [statement(currency="EUR")])
         self.assertEqual(blocked["status"], "needs_input")
@@ -202,6 +210,24 @@ class BuildTest(unittest.TestCase):
         asked = []
         result, _, _, _ = self.build([fixture_plan()], ask=lambda items: asked.extend(items) or {})
         self.assertEqual((result["status"], asked), ("success", []))
+
+    def test_values_from_a_file_not_attached_are_asked_about_before_any_model_call(self):
+        with TemporaryDirectory() as directory:
+            folder = Path(directory)
+            source, target, _, context = fixtures(folder)
+            build = lambda replies, answers, name: (lambda client: (build_workflow(
+                source, target, [], context, answers, client, Events(folder / name)), client))(FakeModel(replies))
+            blocked, client = build([], {}, "blocked")
+            self.assertEqual((blocked["status"], client.messages), ("needs_input", []))
+            item = blocked["questions"][0]
+            self.assertEqual((item["code"], item["columns"]), ("missing_source", {"Import": ["Amount"]}))
+            self.assertEqual(item["options"], ["Build anyway", "Stop: I will attach the source"])
+            with self.assertRaisesRegex(ValueError, "Stopped by a recorded answer"):
+                build([], {item["id"]: "Stop: I will attach the source"}, "stopped")
+            asked = {"status": "needs_input", "workflow": None, "question": "Where do amounts come from?", "options": None}
+            onward, client = build([asked], {item["id"]: "Build anyway"}, "onward")
+            self.assertEqual((onward["status"], len(client.messages)), ("needs_input", 1))
+            self.assertIn("Build anyway", client.messages[0][1]["content"])
 
     def test_a_job_without_a_bank_statement_still_learns_its_outputs(self):
         with TemporaryDirectory() as directory:

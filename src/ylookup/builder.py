@@ -385,6 +385,12 @@ def masker(env, sources):
             return value
         return plain(value)
 
+    def unmask(text):
+        """The model's words with the tokens put back, for a person to read."""
+        reverse = {**{t: v for v, t in tokens.items()}, **{t: d for d, t in dates.items()}}
+        return re.sub(r"\b(?:V|DATE)_\d+\b", lambda m: reverse.get(m.group(), m.group()), str(text))
+
+    mask.unmask = unmask
     return mask, set(tokens)
 
 
@@ -435,6 +441,24 @@ def survey(env, outputs, expected, helpers, private, mask):
     return view, checks, shapes, unexplained
 
 
+MISSING_STOP = "Stop: I will attach the source"
+
+
+def missing_sources(view, outputs, expected):
+    """Output columns whose example values vary but no expression over the attached files reproduces any
+    of them: the file they come from was not given. Returns {table: [columns]}."""
+    found = {}
+    for key, item in view.items():
+        rows = expected[key] if outputs[key]["op"] == "append_rows" else list(expected[key].values())
+        for column, groups in item["columns"].items():
+            # ponytail: "varies" needs two distinct values, so a one-row output never asks; constants may be
+            # template literals the model can write.
+            varies = len({canon(row.get(column)) for row in rows} - {None}) > 1
+            if varies and not any(isinstance(g, list) and any(e is not None for e in g) for g in groups.values()):
+                found.setdefault(key, []).append(column)
+    return found
+
+
 def learn(workbook, target, sources, answers):
     """Everything code can establish before the model is asked: outputs, evidence, candidates, checks."""
     found, questions = read_sources(workbook, sources)
@@ -464,6 +488,14 @@ def learn(workbook, target, sources, answers):
     view, checks, shapes, unexplained = survey(env, outputs, expected, helpers, private, mask)
     for key in unexplained:
         del outputs[key], expected[key]
+    missing = missing_sources(view, outputs, expected)
+    if missing:
+        listed = "; ".join(f"{key} ({', '.join(columns)})" for key, columns in missing.items())
+        item = question("missing_source", f"The completed example holds values I cannot find in any attached file: {listed}. "
+                        "Attach the file they come from, or build anyway and work from the examples?",
+                        hashlib.sha1(listed.encode()).hexdigest()[:10], options=["Build anyway", MISSING_STOP],
+                        stop=MISSING_STOP, columns=missing)
+        (settled if answered(item, answers) is not None else questions).append(item)
     used = {ref for ref in env["refs"] if json.dumps(ref) in json.dumps(view)}
     relevant = {env["refs"][ref][0] for ref in used} | set(outputs) | {n[k] for n in names for k in ("table", "to")}
     relevant |= {node["lookup"]["table"] for node in walk(view) if "lookup" in node}
@@ -759,8 +791,9 @@ def build_workflow(workbook, target, sources, context, answers, client, events, 
                 if reply.get("status") == "needs_input":
                     if not isinstance(reply.get("question"), str) or not reply["question"].strip():
                         raise ValueError("A needs_input reply must carry a nonempty question.")
-                    item = question("model_question", reply["question"], hashlib.sha1(reply["question"].encode()).hexdigest()[:10],
-                                    options=reply.get("options") or None, scope="workflow")
+                    item = question("model_question", mask.unmask(reply["question"]),
+                                    hashlib.sha1(reply["question"].encode()).hexdigest()[:10],
+                                    options=[mask.unmask(o) for o in reply.get("options") or []] or None, scope="workflow")
                     asked[item["id"]] = item
                     events.emit("inquiry", attempt=attempt, question=item)
                     if answered(item, answers) is None and ask_until_settled([item], answers, ask):
