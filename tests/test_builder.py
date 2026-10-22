@@ -169,6 +169,40 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(feedback["iterations_that_fit"], [{"for_each": "Roster", "only_linked": False, "lines": 2}])
         self.assertIn("Import iteration", events.path.read_text())
 
+    def saved_files(self, events):
+        return [p.name for p in events.directory.rglob("*") if p.name in ("workflow.json", "output.xlsx")]
+
+    def test_a_first_plan_that_matches_stops_the_loop(self):
+        result, client, _, _ = self.build([fixture_plan(), fixture_plan()])
+        self.assertEqual((result["status"], result["attempts"], len(client.messages)), ("success", 1, 1))
+
+    def test_an_exhausted_budget_saves_nothing(self):
+        replies = []
+        for debit in (["N", "Y"], ["Y", "Y"], ["N", "N"], ["X", "N"], ["Y", "X"]):  # never the same twice, so code adopts nothing
+            replies.append(fixture_plan())
+            replies[-1]["steps"][3]["columns"]["Debit"] = {"line": debit}
+        result, client, events, _ = self.build(replies)
+        self.assertEqual((result["status"], len(client.messages)), ("budget_exhausted", 5))
+        self.assertEqual(self.saved_files(events), [])
+
+    def test_each_attempt_is_told_only_its_own_differences_and_kept_columns_grow(self):
+        first, second = fixture_plan(), fixture_plan()
+        first["steps"][3]["columns"]["Debit"] = {"line": ["N", "Y"]}
+        first["steps"][3]["columns"]["Comment"] = "Paid"
+        second["steps"][3]["columns"]["Comment"] = "Paid by"
+        result, client, _, _ = self.build([first, second, fixture_plan()])
+        self.assertEqual((result["status"], result["attempts"]), ("success", 3))
+        feedback = [json.loads(request[-1]["content"]) for request in client.messages[1:]]
+        self.assertEqual({d["column"] for d in feedback[0]["differences"]}, {"Debit", "Comment"})
+        self.assertEqual({d["column"] for d in feedback[1]["differences"]}, {"Comment"})
+        self.assertLess(len(feedback[0]["locked_columns"]), len(feedback[1]["locked_columns"]))
+        self.assertIn("Import.Debit", feedback[1]["locked_columns"])
+
+    def test_a_clean_job_asks_nothing(self):
+        asked = []
+        result, _, _, _ = self.build([fixture_plan()], ask=lambda items: asked.extend(items) or {})
+        self.assertEqual((result["status"], asked), ("success", []))
+
     def test_a_job_without_a_bank_statement_still_learns_its_outputs(self):
         with TemporaryDirectory() as directory:
             source, target, _, _ = fixtures(Path(directory))

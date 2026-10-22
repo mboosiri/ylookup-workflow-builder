@@ -151,6 +151,36 @@ has 0 differences from the completed target:
 | `missing-data` (blank investor name, blank Deal) | ⛔ Asks for both values; no workbook | ✅ = target |
 | `duplicate-name`, `unknown-payer` | ⛔ Asks which investor a statement row belongs to: the candidates or "leave it unlinked" | ✅ Uses the chosen investor |
 
+## Stress: iteration and inquiry
+
+Two behaviours, scored live on the given files. Expectations are per kind of variation, never per value:
+a doubtful variant should ask (else it **guessed**), a harmless one should not (else it **over-asked**).
+
+```sh
+python scripts/stress_variants.py data/import-capital-call-notice-diu-input.xlsx
+python scripts/stress_agentic.py --repeats 3      # writes runs/stress-agentic-<time>/scores.json
+```
+
+Measured (1 repeat, 22 October 2026):
+
+| Scenario | Expect | Result | Model calls |
+|---|---|---|---|
+| build | iterate | ✅ attempt 1 differed (20 cells), attempt 2 matched | 2 |
+| `duplicate-name`, `unknown-payer` | ask | ✅ asked (`link`), no model call; after "leave it unlinked" the run finishes | 0 |
+| `missing-data` | ask | ✅ asked (4 `missing_value`) | 0 |
+| `ambiguous-amounts` | ask | ✅ asked (`column_mapping`) | 1 |
+| `distractor-column` | ask or map | ✅ asked | 1 |
+| `tracker-reshuffled` | ask or map | ✅ mapped, verified | 1 |
+| `tabs-renamed`, `columns-reordered`, `extra-investor` | no question | ✅ quiet | 0 |
+
+None guessed, none over-asked. A row a person leaves unlinked (the customer's "leave it blank to chase up
+later") is staged with a blank investor and credited to nobody; the learned checks excuse its link columns
+and keep it out of linked totals, and still check everything else.
+
+Offline, `tests/test_builder.py` and `tests/test_run.py` pin the same behaviours on a different template:
+the loop stops at the first match, an exhausted budget saves nothing, each attempt is told only its own
+differences, a clean job asks nothing, and an unclear payer is asked about, never guessed, and can be left unlinked.
+
 ## UI: chat
 
 ```sh

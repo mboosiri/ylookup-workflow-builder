@@ -8,7 +8,8 @@ from unittest.mock import patch
 from openpyxl import load_workbook
 
 from ylookup.planner import run_workflow
-from fixtures import built, edit, pages
+from ylookup.sources import LEAVE
+from fixtures import built, edit, pages, statement
 
 
 class RunTest(unittest.TestCase):
@@ -49,6 +50,29 @@ class RunTest(unittest.TestCase):
         self.assertEqual(book["Import"]["L5"].value, "Morgan Vale")
         book.close()
         self.assertIn("Morgan Vale", (self.folder / "answered/answers.json").read_text())
+
+    def test_an_unclear_payer_is_asked_about_never_guessed(self):
+        for name, roster_change, description in [("nobody", None, "REF UNKNOWN PAYER"),
+                                                 ("two", ("Roster", "B4", "Taylor Reeves"), "REF TAYLOR REE")]:
+            with self.subTest(name):
+                if roster_change:
+                    edit(self.source, roster_change)
+                with patch("ylookup.sources.pdf_pages", return_value=pages(statement(description=description))):
+                    asked = run_workflow(self.workflow, self.source, [self.bank], self.folder / name)
+                self.assertEqual(asked["status"], "needs_input")
+                link = [q for q in asked["questions"] if q["code"] == "link"]
+                self.assertEqual(len(link), 1)
+                self.assertIn(LEAVE, link[0]["options"])
+                self.assertFalse((self.folder / name / "output.xlsx").exists())
+                # Leaving it for follow-up is a valid answer: the learned checks excuse that row's link columns.
+                with patch("ylookup.sources.pdf_pages", return_value=pages(statement(description=description))):
+                    left = run_workflow(self.workflow, self.source, [self.bank], self.folder / f"{name}-left",
+                                        answers={link[0]["id"]: LEAVE})
+                self.assertEqual(left["status"], "success", left.get("check_failures"))
+                book = load_workbook(left["output"], data_only=True)
+                self.assertEqual([c.value for c in book["Staging"][2]], [book["Staging"]["A2"].value, book["Staging"]["B2"].value, 95, None])
+                self.assertEqual(book["Import"]["H3"].value, 0)  # nobody was credited with the unlinked payment
+                book.close()
 
     def test_an_output_table_that_already_has_rows_stops_instead_of_being_overwritten(self):
         edit(self.source, ("Import", "A2", "an earlier upload"))

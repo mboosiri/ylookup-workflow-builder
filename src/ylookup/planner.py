@@ -351,7 +351,7 @@ def unit_questions(env, source, target):
 
 def run_link(env, source, text_, target, name, policy):
     result = link_rows(env["tables"][source], text_, env["tables"][target], name, policy, env["answers"], source, target)
-    env["links"][source] = {"to": target, "rows": result["rows"]}
+    env["links"][source] = {"to": target, "rows": result["rows"], "left": result["left"]}
     env["linked"][target] = {"from": source, "records": result["records"]}
     for item in result["questions"] + [q for q in unit_questions(env, source, target) if answered(q, env["answers"]) is None]:
         env["questions"][item["id"]] = item
@@ -377,7 +377,7 @@ def execute_plan(plan, spec, env, events):
                 rows.append(values)
                 errors += [{"table": step["table"], "row": ctx["row"], "line": ctx["line"], "column": name, "error": message}
                            for name, message in problems]
-            outputs[step["table"]] = {"op": step["op"], "rows": rows, "contexts": ctxs, "lines": lines}
+            outputs[step["table"]] = {"op": step["op"], "rows": rows, "contexts": ctxs, "lines": lines, "columns": step["columns"]}
         events.emit("operation_end", operation=step["op"], table=step["table"])
     return outputs, errors
 
@@ -429,11 +429,12 @@ def link_totals(env):
     """Per linked table and numeric column: the total over the rows that were linked."""
     totals = {}
     for source, link in env["links"].items():
-        rows = [env["tables"][source]["records"][i] for i, record in link["rows"].items() if record is not None]
+        records = env["tables"][source]["records"]
+        rows = [records[i] for i, record in link["rows"].items() if record is not None]
         for name in env["tables"][source]["columns"]:
-            values = [r["values"].get(name) for r in rows]
+            values = [r["values"].get(name) for r in records]  # numeric by the whole column, so no links means 0
             if any(kind(v) == "number" for v in values) and all(kind(v) in (None, "number") for v in values):
-                totals[f"{source}.{name}"] = sum((number(v) for v in values if kind(v)), Decimal(0))
+                totals[f"{source}.{name}"] = sum((number(r["values"].get(name)) for r in rows if kind(r["values"].get(name))), Decimal(0))
     return totals
 
 
@@ -451,8 +452,24 @@ def total_checks(key, columns, target, lines, totals):
     return checks
 
 
+def left_unlinked(output, column, env):
+    """Output rows built from a source row a person chose to leave unlinked, when this column reads through
+    that link. The example only shows linked rows, so its conventions do not apply to these."""
+    expression = json.dumps(output.get("columns", {}).get(column))
+    rows = set()
+    for i, ctx in enumerate(output["contexts"]):
+        link = env["links"].get(ctx["table"])
+        # ponytail: "reads through the link" = the expression names the linked table; a lookup keyed by
+        # another output column that itself reads the link is not traced.
+        if link and ctx["index"] in link.get("left", ()) and f'"{link["to"]}.' in expression:
+            rows.add(i)
+    return rows
+
+
 def check_outputs(checks, outputs, env):
-    """Every learned convention, re-checked on this run's rows. Returns plain-language failures."""
+    """Every learned convention, re-checked on this run's rows. Returns plain-language failures.
+
+    Rows a person left unlinked are excused from checks on columns that read the link, and from linked totals."""
     failures, totals = [], link_totals(env)
     for check in checks:
         output = outputs.get(check["table"])
@@ -460,7 +477,11 @@ def check_outputs(checks, outputs, env):
             continue
         rows, lines, column, line = output["rows"], output["lines"], check["column"], check.get("line")
         values = [row.get(column) for row in rows]
-        indexes = list(range(len(rows)))[line - 1::lines] if line else list(range(len(rows)))
+        excused = left_unlinked(output, column, env)
+        if check["kind"] == "total":  # a total ties to linked rows only, so rows left unlinked are not part of it
+            excused = {i for i, ctx in enumerate(output["contexts"])
+                       if ctx["index"] in env["links"].get(ctx["table"], {}).get("left", ())}
+        indexes = [i for i in (list(range(len(rows)))[line - 1::lines] if line else range(len(rows))) if i not in excused]
         part = [values[i] for i in indexes]
         name = f"{check['table']}.{column}" + (f" (line {line})" if line else "")
         kind_ = check["kind"]

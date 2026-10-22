@@ -454,13 +454,14 @@ def link_rows(source, text, target, name, policy, answers, source_key="rows", ta
     """Link each row of one table to one record of another whose name its text contains.
 
     Doubt becomes a question with the candidate names (or leaving the row unlinked), never a guess.
-    Returns {"rows": {row index: record index or None}, "records": {record index: [row indexes]}, "questions"}.
+    Returns {"rows": {row index: record index or None}, "records": {record index: [row indexes]},
+    "left": row indexes a person chose to leave unlinked, "questions"}.
     """
     names = {i: r["values"][name] for i, r in enumerate(target["records"])
              if isinstance(r["values"].get(name), str) and normalise(r["values"][name])}
     display = {i: n if list(names.values()).count(n) == 1 else f"{n} (row {target['records'][i]['row']})"
                for i, n in names.items()}
-    rows, records, issues = {}, {}, []
+    rows, records, left, issues = {}, {}, set(), []
     for index, row in enumerate(source["records"]):
         value = row["values"].get(text)
         found, method = match_names(value, names, policy) if isinstance(value, str) else ([], "full_name")
@@ -473,11 +474,13 @@ def link_rows(source, text, target, name, policy, answers, source_key="rows", ta
             reply = answered(item, answers)
             if reply is None:
                 issues.append(item)
-            elif reply != LEAVE:
+            elif reply == LEAVE:
+                left.add(index)
+            else:
                 record = next((i for i, n in display.items() if n == reply), None)
                 if record is None:
                     issues.append({**item, "question": item["question"] + f" (the answer '{reply}' is not one of the options)"})
         rows[index] = record
         if record is not None:
             records.setdefault(record, []).append(index)
-    return {"rows": rows, "records": records, "questions": issues}
+    return {"rows": rows, "records": records, "left": left, "questions": issues}
