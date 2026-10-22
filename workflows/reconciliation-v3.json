@@ -2,11 +2,11 @@
   "schema_version": 3,
   "workflow_version": 1,
   "plan": {
-    "intent": "Process bank statement payments by matching them to investors in the Capital Call Tracker, log received amounts, and generate balanced accounting entries for upload.",
+    "intent": "Process bank statement payments by matching them to investors in the Capital Call Tracker, log received amounts, and generate balanced accounting entries for upload, ensuring correct fixed values for allocation rule and debit flag with properly structured expressions.",
     "steps": [
       {
         "op": "link_rows",
-        "intent": "Match each bank statement entry to the correct investor using full name or unique name prefix.",
+        "intent": "Match each bank statement entry to the correct investor using full name or unique name prefix, ensuring accurate tracking of payments.",
         "table": "BS-Test-4",
         "text": "Description",
         "to": "Capital Call Tracker",
@@ -15,7 +15,7 @@
       },
       {
         "op": "append_rows",
-        "intent": "Create a staging table with bank statement details, including matched investor names.",
+        "intent": "Create staging rows for each bank statement entry, capturing date, description, deposit amount, and matched investor for further processing.",
         "table": "Bank Statement Staging",
         "for_each": "BS-Test-4",
         "only_linked": false,
@@ -38,7 +38,7 @@
       },
       {
         "op": "fill_columns",
-        "intent": "Update the Capital Call Tracker with the date from the bank statement and the amount received, then calculate the remaining outstanding balance.",
+        "intent": "Update the Capital Call Tracker with the bank statement date, total received amount, and updated outstanding balance for each investor.",
         "table": "Capital Call Tracker",
         "columns": {
           "Date as per bank statement": {
@@ -61,7 +61,7 @@
       },
       {
         "op": "append_rows",
-        "intent": "Generate two accounting lines per investor: one for cash received and one for the investor's liability reduction, using correct GL codes and amounts.",
+        "intent": "Generate two balanced accounting lines per capital call: one for cash received and one for the reduction in investor liability, using correct GL codes and currency, with fixed allocation rule and debit flag values, using line-outermost expressions to avoid blank parts.",
         "table": "DIU",
         "for_each": "Capital Call Tracker",
         "only_linked": false,
@@ -114,7 +114,11 @@
                   }
                 ]
               },
-              "Due From Investors"
+              {
+                "concat": [
+                  "Due From Investors"
+                ]
+              }
             ]
           },
           "Account": {
@@ -356,7 +360,8 @@
           ],
           "position": "D"
         }
-      }
+      },
+      "file": "BS-Test-4.pdf"
     },
     "Bank Statement Staging": {
       "sheet": "Bank Statement Staging",
@@ -718,6 +723,13 @@
     },
     {
       "table": "Bank Statement Staging",
+      "kind": "sign",
+      "column": "Deposit",
+      "line": 1,
+      "allowed": "non_negative"
+    },
+    {
+      "table": "Bank Statement Staging",
       "kind": "required",
       "column": "Deposit",
       "line": 1
@@ -737,9 +749,23 @@
     },
     {
       "table": "Capital Call Tracker",
+      "kind": "sign",
+      "column": "Amount Received",
+      "line": 1,
+      "allowed": "non_negative"
+    },
+    {
+      "table": "Capital Call Tracker",
       "kind": "required",
       "column": "Amount Received",
       "line": 1
+    },
+    {
+      "table": "Capital Call Tracker",
+      "kind": "sign",
+      "column": "Amount outstanding",
+      "line": 1,
+      "allowed": "non_negative"
     },
     {
       "table": "Capital Call Tracker",
@@ -888,6 +914,13 @@
     },
     {
       "table": "DIU",
+      "kind": "sign",
+      "column": "Batch Index",
+      "line": 1,
+      "allowed": "non_negative"
+    },
+    {
+      "table": "DIU",
       "kind": "required",
       "column": "Batch Index",
       "line": 1
@@ -897,6 +930,13 @@
       "kind": "uniform",
       "column": "Batch Index",
       "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "sign",
+      "column": "Batch Index",
+      "line": 2,
+      "allowed": "non_negative"
     },
     {
       "table": "DIU",
@@ -946,9 +986,23 @@
     },
     {
       "table": "DIU",
+      "kind": "sign",
+      "column": "JE Index",
+      "line": 1,
+      "allowed": "non_negative"
+    },
+    {
+      "table": "DIU",
       "kind": "required",
       "column": "JE Index",
       "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "sign",
+      "column": "JE Index",
+      "line": 2,
+      "allowed": "non_negative"
     },
     {
       "table": "DIU",
@@ -968,6 +1022,13 @@
     },
     {
       "table": "DIU",
+      "kind": "sign",
+      "column": "Trans Index",
+      "line": 1,
+      "allowed": "non_negative"
+    },
+    {
+      "table": "DIU",
       "kind": "required",
       "column": "Trans Index",
       "line": 1
@@ -977,6 +1038,13 @@
       "kind": "uniform",
       "column": "Trans Index",
       "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "sign",
+      "column": "Trans Index",
+      "line": 2,
+      "allowed": "non_negative"
     },
     {
       "table": "DIU",
@@ -1132,9 +1200,23 @@
     },
     {
       "table": "DIU",
+      "kind": "sign",
+      "column": "Amount (Local)",
+      "line": 1,
+      "allowed": "non_negative"
+    },
+    {
+      "table": "DIU",
       "kind": "required",
       "column": "Amount (Local)",
       "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "sign",
+      "column": "Amount (Local)",
+      "line": 2,
+      "allowed": "non_negative"
     },
     {
       "table": "DIU",
@@ -1149,9 +1231,23 @@
     },
     {
       "table": "DIU",
+      "kind": "sign",
+      "column": "Amount (LE)",
+      "line": 1,
+      "allowed": "non_negative"
+    },
+    {
+      "table": "DIU",
       "kind": "required",
       "column": "Amount (LE)",
       "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "sign",
+      "column": "Amount (LE)",
+      "line": 2,
+      "allowed": "non_negative"
     },
     {
       "table": "DIU",
@@ -1266,6 +1362,13 @@
     },
     {
       "table": "DIU",
+      "kind": "sign",
+      "column": "Investor Amount (LE)",
+      "line": 2,
+      "allowed": "non_negative"
+    },
+    {
+      "table": "DIU",
       "kind": "required",
       "column": "Investor Amount (LE)",
       "line": 2
@@ -1278,15 +1381,36 @@
     },
     {
       "table": "DIU",
+      "kind": "sign",
+      "column": "Investor Amount (Local)",
+      "line": 2,
+      "allowed": "non_negative"
+    },
+    {
+      "table": "DIU",
       "kind": "required",
       "column": "Investor Amount (Local)",
       "line": 2
     },
     {
       "table": "DIU",
+      "kind": "sign",
+      "column": "Transaction GL Reference",
+      "line": 1,
+      "allowed": "non_negative"
+    },
+    {
+      "table": "DIU",
       "kind": "required",
       "column": "Transaction GL Reference",
       "line": 1
+    },
+    {
+      "table": "DIU",
+      "kind": "sign",
+      "column": "Transaction GL Reference",
+      "line": 2,
+      "allowed": "non_negative"
     },
     {
       "table": "DIU",
@@ -1414,6 +1538,6 @@
     "sources": [
       "BS-Test-4.pdf"
     ],
-    "prompt_version": "workflow-plan-v21"
+    "prompt_version": "workflow-plan-v22"
   }
 }

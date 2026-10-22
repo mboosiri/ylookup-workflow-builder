@@ -165,8 +165,8 @@ It stores no cell addresses and no answer rows.
   chat build asked the model's own question, took a typed answer and succeeded. Earlier rounds on the
   receipt-specific design: 20 of 20 on its final code, 4 with code adopting a candidate; before the
   repairs were added, 1/5 to 10/10. A failed build saves nothing.
-- **Adapt is conservative.** On an empty renamed column (`Value Date`) or two similar numeric
-  columns, the model often asks instead of mapping; a person answers at the prompt.
+- **Adapt is conservative.** On two similar columns (`Call #8 - Total Call` next to an estimate, or two
+  empty `Amount` columns) the model often asks instead of mapping; a person answers at the prompt.
 - **Missing sources are asked about, not guessed.** Before any model call, an output column whose example values vary but that no expression over the attached files reproduces is listed in one question: attach the file they come from, or build anyway. A one-row output or a constant column never triggers it.
 - **Rows left unlinked by a person** are excused from checks on columns whose expression names the linked table, and from linked totals. A lookup that reads such a column through another output column is not traced.
 - **Sign ranges come from one example.** A column that can go negative but never did in the example asks once per record and value; the cost is a question, never a wrong number.

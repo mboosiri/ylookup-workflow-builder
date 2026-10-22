@@ -145,8 +145,8 @@ ylookup adapt \
 5. Rejected picks become questions. Every learned check is re-run before `workflow.json` is saved as
    v+1, with the new headers and each mapping's `decided_by`.
 
-Live results with the model, on the committed workflow. "= target" means the adapted run's output
-has 0 differences from the completed target:
+Live results with the model, on the committed workflow (rebuilt 22 October 2026 with prompt v22 and sign
+checks; plan unchanged). "= target" means the adapted run's output has 0 differences from the completed target:
 
 | Variant in `data/stress/` | Without a person | After answering |
 |---|---|---|
@@ -155,11 +155,11 @@ has 0 differences from the completed target:
 | `constants-renamed` (Legal Entity, Bank Account, Batch Type) | ✅ Model maps all three; verified; v2; = target | |
 | `chart-renamed`, `chart-tab-renamed` (chart headers, then its tab too) | ✅ Right table found; model maps both; v2; = target | |
 | `columns-renamed`, `combined` | ✅ Model maps 3 columns; v2; = target | |
-| `distractor-column` (`Call #8 - Total Call` next to `Call #8 - Estimate`) | ✅ v2, or ⛔ asks which (model unsure in 1 of 3 runs) | ✅ v2, `decided_by: person`; = target |
-| `tracker-reshuffled` (columns swapped, `Value Date` renamed) | ⛔ usually asks whether `Value Date` is the statement date (mapped in 1 of 4 runs) | ✅ v2; = target |
+| `distractor-column` (`Call #8 - Total Call` next to `Call #8 - Estimate`) | ✅ v2; = target, or ⛔ asks which (asked in 3 of 4 runs) | ✅ v2, `decided_by: person`; = target |
+| `tracker-reshuffled` (columns swapped, `Value Date` renamed) | ✅ maps `Value Date` to the statement date in 4 of 4 runs (it used to ask); v2; = target | |
 | `ambiguous-amounts` (`Amount 1`, `Amount 2`) | ⛔ Two empty columns fit; a person must choose | ✅ v2, `decided_by: person`; = target |
 | `missing-data` (blank investor name, blank Deal) | ⛔ Asks for both values; no workbook | ✅ = target |
-| `duplicate-name`, `unknown-payer` | ⛔ Asks which investor a statement row belongs to: the candidates or "leave it unlinked" | ✅ Uses the chosen investor |
+| `duplicate-name`, `unknown-payer` | ⛔ Asks which investor a statement row belongs to: the candidates or "leave it unlinked" | ✅ Uses the chosen investor; if that investor was called less than the payment, the negative outstanding asks first |
 
 ## Stress: iteration and inquiry
 
@@ -182,7 +182,7 @@ Measured (3 repeats each, 22 October 2026, current code):
 | `missing-data` | ask | ✅ 3 of 3 asked (4 `missing_value`) | 0 |
 | `ambiguous-amounts` | ask | ✅ 3 of 3 asked (`column_mapping`) | 1 |
 | `distractor-column` | ask or map | ✅ 3 of 3 asked | 1 |
-| `tracker-reshuffled` | ask or map | ✅ 1 mapped and verified, 2 asked | 1 |
+| `tracker-reshuffled` | ask or map | ✅ 3 of 3 mapped and verified | 1 |
 | `tabs-renamed`, `columns-reordered`, `extra-investor` | no question | ✅ 3 of 3 quiet | 0 |
 
 Before the link note, the one-line description built 2 of 3 (one stopped at a question the files already
